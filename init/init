@@ -1,0 +1,105 @@
+#!/bin/busybox sh
+# AI 装机助手 init（PID 1）
+# 由 GRUB 以 rdinit=/init 启动，运行在 initramfs 中。
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+# ---------- 基础文件系统 ----------
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev 2>/dev/null
+mkdir -p /dev/pts /dev/shm /tmp
+mount -t devpts none /dev/pts 2>/dev/null
+mount -t tmpfs none /dev/shm 2>/dev/null
+mount -t tmpfs none /tmp 2>/dev/null
+
+mdev -s 2>/dev/null
+
+# ---------- 内核模块（发行版内核：存储/文件系统/网卡/输入/显示）----------
+# 清单来自打包时的 pack/kernel-modules.list，模块为解压态 .ko（busybox 不支持 .ko.zst）。
+# 必须在挂载数据分区与 DHCP 之前加载，否则看不到 /dev/sd*、/dev/nvme* 和网卡。
+if [ -f /ventoy/ai/kernel-modules.list ]; then
+    echo "[init] 加载内核模块..."
+    while read -r m; do
+        case "$m" in ''|'#'*) continue ;; esac
+        modprobe "$m" 2>/dev/null
+    done < /ventoy/ai/kernel-modules.list
+fi
+
+# 等待块设备枚举（模块刚加载，分区节点可能稍后出现）
+n=0
+while [ $n -lt 40 ]; do
+    found=0
+    for p in /sys/class/block/*/partition; do
+        if [ -e "$p" ]; then found=1; break; fi
+    done
+    [ "$found" = "1" ] && break
+    sleep 0.25
+    n=$((n + 1))
+done
+
+# ---------- 挂载 Ventoy 数据分区到 /iso ----------
+echo "[init] 查找 Ventoy 数据分区..."
+if /ventoy/ai/mount_payload.sh; then
+    echo "[init] 数据分区已挂载到 /iso"
+else
+    echo "[init] 警告: 未找到可用的 Ventoy 数据分区，/iso 为空"
+fi
+
+# ---------- 网络（DHCP） ----------
+IFACE=""
+for f in /sys/class/net/*; do
+    n=$(basename "$f")
+    [ "$n" = "lo" ] && continue
+    IFACE="$n"
+    break
+done
+if [ -n "$IFACE" ]; then
+    echo "[init] 网络接口 $IFACE，启动 DHCP..."
+    udhcpc -i "$IFACE" -s /ventoy/ai/udhcpc.script -b -t 8 -T 3 2>/dev/null
+    n=0
+    while [ $n -lt 20 ]; do
+        if ifconfig "$IFACE" 2>/dev/null | grep -q "inet addr:"; then
+            break
+        fi
+        sleep 0.5
+        n=$((n + 1))
+    done
+    echo "[init] 网络: $(ifconfig "$IFACE" 2>/dev/null | grep -o 'inet addr:[0-9.]*' | head -1)"
+fi
+
+# ---------- AI 配置：数据分区上的配置优先 ----------
+if [ -f /iso/ventoy/ai.json ]; then
+    cp /iso/ventoy/ai.json /ventoy/ai.json
+    echo "[init] 使用数据分区配置 /iso/ventoy/ai.json"
+fi
+if [ ! -f /ventoy/ai.json ]; then
+    echo "[init] 未找到 ai.json，请参考 /ventoy/ai/ai.json.example 创建 /iso/ventoy/ai.json"
+fi
+
+# ---------- M1 自动化测试钩子 ----------
+# 数据分区存在 test_script.txt 时以脚本模式运行（QEMU 端到端测试用），且不真正重启。
+# 内核参数 vtoy_ai_interactive=1 可强制交互模式（忽略 test_script.txt）。
+if [ -f /iso/ventoy/ai/test_script.txt ]; then
+    cp /iso/ventoy/ai/test_script.txt /ventoy/ai/test_script.txt
+fi
+AGENT_OPTS=""
+if [ "$vtoy_ai_interactive" = "1" ]; then
+    echo "[init] 交互模式（vtoy_ai_interactive=1），忽略 test_script.txt"
+elif [ -f /ventoy/ai/test_script.txt ]; then
+    AGENT_OPTS="--script /ventoy/ai/test_script.txt --no-reboot"
+    export VTOY_AI_NO_REBOOT=1
+    echo "[init] 检测到 test_script.txt，进入脚本模式（no_reboot）"
+fi
+
+# ---------- 运行 AI agent ----------
+# 控制台按 UTF-8 处理退格：否则串口下退格中文只删一个字节，行内残留半个字符（无效 UTF-8）
+stty -F /dev/console iutf8 2>/dev/null
+echo "[init] 启动 os-pilot-ai ..."
+# 标记运行在 AI initramfs 内：agent 据此判断是否允许接管本地显示器（自绘屏幕）
+export VTOY_AI_INITRAMFS=1
+/ventoy/ai/os-pilot-ai $AGENT_OPTS </dev/console >/dev/console 2>&1
+rc=$?
+echo "[init] os-pilot-ai 退出（rc=$rc），系统关机"
+sync
+poweroff -f

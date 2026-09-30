@@ -1,0 +1,23 @@
+#!/bin/busybox sh
+# busybox udhcpc 事件脚本
+
+case "$1" in
+    deconfig)
+        ifconfig "$interface" 0.0.0.0 2>/dev/null
+        ;;
+    renew|bound)
+        ifconfig "$interface" "$ip" netmask "$subnet" 2>/dev/null
+        if [ -n "$router" ]; then
+            for r in $router; do
+                route add default gw "$r" 2>/dev/null && break
+            done
+        fi
+        if [ -n "$dns" ]; then
+            : > /etc/resolv.conf
+            for d in $dns; do
+                echo "nameserver $d" >> /etc/resolv.conf
+            done
+        fi
+        echo "[udhcpc] $interface: $ip/$subnet gw=$router dns=$dns"
+        ;;
+esac

@@ -1,0 +1,68 @@
+# AI 环境：随 initramfs 携带的发行版内核模块清单（x86_64）
+#
+# 行内只写模块名（modprobe 名）；空行与 # 注释行忽略。
+# 用途：
+#   1) fetch_kernel.sh 按本清单从发行版模块包求依赖闭包，裁剪出最小模块集；
+#   2) 该文件同时被装入 initramfs（/ventoy/ai/kernel-modules.list），
+#      由 init 在挂载数据分区前逐个 modprobe。
+#
+# 选型原则：
+#   - 内核内建（CONFIG_*=y）的驱动不列：virtio_blk/virtio_net/sd_mod/sr_mod/libata/
+#     ata_piix/xhci/ehci/simpledrm/fbdev/ext4/vfat/fat/loop/squashfs/nls_cp437 等。
+#   - 真机 UEFI 屏幕走内建 simpledrm（GOP 帧缓冲），不依赖 GPU 驱动；
+#     发行版 amdgpu/i915/radeon/nouveau 需要 /lib/firmware 微码（未随包携带），
+#     且体积巨大（amdgpu 解压后 43MB+），故不列入。
+#   - QEMU BIOS 路径依赖 bochs；QEMU virtio-gpu 显示依赖 virtio_gpu。
+
+# ---------- 存储控制器 / 介质 ----------
+ahci
+nvme
+usb-storage
+uas
+sdhci
+sdhci-pci
+mmc_block
+
+# ---------- 文件系统（Ventoy 数据分区与常见安装目标）----------
+exfat
+ntfs3
+xfs
+udf
+isofs
+msdos
+nls_utf8
+nls_iso8859-1
+nls_cp936
+
+# ---------- 有线网卡 ----------
+e1000
+e1000e
+igb
+igc
+ixgbe
+r8169
+tg3
+alx
+atl1c
+bnx2
+skge
+sky2
+forcedeth
+8139too
+
+# ---------- USB 网卡 / 手机共享网络 ----------
+usbnet
+cdc_ether
+cdc_ncm
+asix
+ax88179_178a
+r8152
+
+# ---------- 输入设备 ----------
+usbhid
+hid_generic
+hid
+
+# ---------- 显示（QEMU；真机走内建 simpledrm）----------
+bochs
+virtio_gpu
