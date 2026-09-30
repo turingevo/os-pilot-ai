@@ -1,0 +1,3 @@
+# 构建产物（构建源在仓库外的构建目录，路径解析见 pack/defaults.sh）
+agent/os-pilot-ai
+__pycache__/
