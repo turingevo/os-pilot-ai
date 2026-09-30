@@ -1,3 +1,5 @@
+**中文** | [English](README.en.md)
+
 # AI 装机助手（os-pilot-ai）
 
 ![](demo.png)
@@ -124,8 +126,9 @@ sh $AI/pack/make_ventoy_testdisk.sh
 QEMU（x86_64）与真机 U 盘均已验证：启动 → 挂载数据分区 → DHCP → 多轮问答与工具调用 → 写 `ventoy.json`
 → 日志落盘 → 关机；T1 菜单闭环（零 Ventoy 代码改动）；真机 UEFI GOP 自绘屏 + 拼音中文输入；内置工具链
 与受守卫磁盘工具 guest 内实测通过；**真机重装闭环已跑通**（Ubuntu 22.04 装到 AI 建的盘，
-`verify_target_image.sh` 8/8 + `run_qemu_target.sh` 引导到 gdm3）。逐轮实测记录见 git log；里程碑与
-验收标准、T1 实测记录见 [`docs/AI装机入口设计.md`](docs/AI装机入口设计.md) §13 / §4.4。
+`verify_target_image.sh` 8/8 + `run_qemu_target.sh` 引导到 gdm3）。逐轮实测记录见
+[`docs/测试.md`](docs/测试.md)；里程碑与验收标准、T1 实测记录见
+[`docs/AI装机入口设计.md`](docs/AI装机入口设计.md) §13 / §4.4。
 
 已知限制：
 
