@@ -53,8 +53,8 @@ llama-server automatically.
 | `defaults.sh` | Build-path resolution layer (sourced by the other scripts): positional args > `VTOY_AI_*` env vars > `~/.config/ventoy-ai/defaults.sh` > built-in fallback outside the repo; also provides the QEMU resource defaults (KVM/memory/CPUs) |
 | `build_busybox.sh` | Build a static x86_64 busybox (downloads the official source tarball + SHA256 verification by default) |
 | `fetch_kernel.sh` | Download the Ubuntu 26.04 distro kernel (linux-image + linux-modules, pinned SHA256) and trim modules per `kernel-modules.list` (`.ko.zst` → `.ko`) |
-| `kernel-modules.list` | Module list shipped in the initramfs (storage/filesystems/NICs/input/display; dependency closure of 59 modules) |
-| `build_tools.sh` | Statically build the partitioning/formatting/backup toolchain: e2fsprogs 1.47.0 + parted 3.6 + rsync 3.2.7 (pinned source SHA256) |
+| `kernel-modules.list` | Module list shipped in the initramfs (storage/filesystems/NICs/input/display; dependency closure of 63 modules) |
+| `build_tools.sh` | Statically build the partitioning/formatting/backup toolchain, 13 binaries: e2fsprogs 1.47.0 + parted 3.6 + rsync 3.2.7 + exfatprogs 1.4.3 + f2fs-tools 1.16.0 + ntfs-3g 2021.8.22 (pinned source SHA256) |
 | `build_llama.sh` | Statically build the llama-server local inference backend (`v3` = x86-64-v3/AVX2 default, `v2` = SSE4.2 for older CPUs; pinned llama.cpp commit + tarball SHA256) |
 | `make_font.sh` | unifont.hex → `$BUILD/screen/font.bin` (shipped with the initramfs; pack_env.sh invokes it automatically when the font is missing) |
 | `pack_env.sh` | Pack the initramfs: init + agent + trimmed module tree + bitmap font + IME + toolchain + local inference backend (auto-generates the font when missing; only warns if the rest are missing) |
@@ -110,8 +110,9 @@ $AI/pack/fetch_kernel.sh
 #    agent degrades to no-IME
 sh $AI/ime/build.sh
 
-# 5) partitioning/formatting/backup toolchain (optional but recommended; outputs
-#    $BUILD/tools/{mke2fs,e2fsck,resize2fs,tune2fs,dumpe2fs,parted,rsync})
+# 5) partitioning/formatting/backup toolchain (optional but recommended; 13 static binaries in
+#    $BUILD/tools/: mke2fs e2fsck resize2fs tune2fs dumpe2fs parted rsync
+#    mkfs.exfat fsck.exfat mkfs.f2fs fsck.f2fs mkntfs ntfsfix)
 #    source tarballs are cached in $BUILD/dl/, reruns do not re-download
 sh $AI/pack/build_tools.sh
 
@@ -157,7 +158,10 @@ Known limitations:
 - Automated regressions mostly use a mock LLM; a real model endpoint (Qwen family) has been verified on real hardware, but function-calling compatibility with other vendors' endpoints has not been checked one by one
 - Verified on x86_64 only (QEMU + real USB); ARM64 is untested
 - The T3 menu entry is not yet wired into `INSTALL/grub/grub.cfg` or the build pipeline (`INSTALL` / `GRUB2` packaging)
-- Disk tools currently format ext2/3/4/vfat only (no exFAT/NTFS tooling); partition/format/backup end-to-end against **a real USB drive itself** (including hot-plug) is untested
+- Disk tools can format ext2/3/4, vfat, exfat, ntfs and f2fs; HFS+ and XFS are read/write-mount only
+  (no usable Linux-side creation tool / xfsprogs not bundled), APFS and ReFS are unsupported — see the
+  [filesystem support matrix](docs/工具与安全.md#文件系统支持矩阵). partition/format/backup end-to-end
+  against **a real USB drive itself** (including hot-plug) is untested
 - `direct` mode (skip confirmations), encrypted key storage, and rollback strategies beyond `/undo` lack end-to-end verification
 - Local model: the GGUF is **not** packed into the ISO (it lives on the data partition under
   `/ventoy/ai/models/`; a 4B-Q4-class model needs ~4.5 GB of RAM); the bundled binary is v3 (AVX2),
@@ -189,6 +193,9 @@ distributed with the initramfs/ISO under their own terms, unaffected by this rep
 | e2fsprogs 1.47.0 | GPL-2.0-or-later / LGPL-2.1 (libuuid) | `pack/build_tools.sh` (kernel.org sources, SHA256-pinned) |
 | GNU parted 3.6 | GPL-3.0-or-later | Same as above (libuuid from the e2fsprogs tree; libblkid statically linked from the host) |
 | rsync 3.2.7 | GPL-3.0-only | Same as above (bundled popt/zlib source trees) |
+| exfatprogs 1.4.3 | GPL-2.0-only | Same as above (`mkfs.exfat` / `fsck.exfat`; all optional external dependencies disabled) |
+| f2fs-tools 1.16.0 | GPL-2.0-only (`lib/`, `libf2fs*`, `f2fs_fs.h` under a LGPL-2.1 dual license) | Same as above (`mkfs.f2fs` / `fsck.f2fs`; the tarball ships no `configure`, needs host `autoreconf -fi`) |
+| ntfs-3g 2021.8.22 | GPL-2.0-or-later (NTFS components and libntfs-3g; fuse-lite under LGPL-2.0) | Same as above, **only `mkntfs` / `ntfsfix`** (`--disable-ntfs-3g`); read/write mounting uses the kernel ntfs3 driver, no FUSE in the artifacts |
 | llama.cpp (llama-server) | MIT | `pack/build_llama.sh` builds a pinned commit statically (v3 bundled in the initramfs, v2 for older CPUs) |
 | GRUB (standalone bootloader) | GPL-3.0-or-later | `pack/make_iso.sh` invokes the host `grub-mkstandalone` |
 

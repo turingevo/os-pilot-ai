@@ -281,8 +281,8 @@ mock 回复 → 请求体落盘确认中文进入模型请求 → 关输入法�
 | `ask_user` | `question, options?` | 无 | 结构化提问（单选/多选/自由文本），返回用户选择 |
 | `schedule_boot` | `image, template?, timeout_sec?` | 高危 | 组合动作：备份 `ventoy.json` → 写入 `control.VTOY_DEFAULT_IMAGE` 与 `auto_install` 条目 → typed confirm → `reboot` |
 | `list_disks` | 无 | 只读 | 枚举整盘/分区（容量/型号/总线/分区表/文件系统/卷标/UUID/挂载点）；`protected=true` 表示承载运行环境或已挂载，禁止改动 |
-| `partition` | `disk, table?, partitions[]` | 高危 | 只接受整盘；受保护盘拒绝；parted 命令由代码拼装（参数白名单）；orchestrate 下逐字输入盘名确认 |
-| `format` | `device, fstype, label?` | 高危 | ext2/3/4（内置 e2fsprogs，显式排除 orphan_file/metadata_csum_seed）与 vfat（内置 `mkfs.vfat`，供 ESP）；已挂载/敏感盘拒绝；逐字输入设备名确认 |
+| `partition` | `disk, table?, partitions[]` | 高危 | 只接受整盘；受保护盘拒绝；parted 命令由代码拼装（参数白名单）；`fs` 提示与 GPT `msftdata` 规则见[文件系统支持矩阵](工具与安全.md#文件系统支持矩阵)；orchestrate 下逐字输入盘名确认 |
+| `format` | `device, fstype, label?` | 高危 | 可建类型由随包静态工具运行时探测决定（ext2/3/4、vfat、exfat、ntfs、f2fs，见[文件系统支持矩阵](工具与安全.md#文件系统支持矩阵)；ext4 显式排除 orphan_file/metadata_csum_seed）；已挂载/敏感盘拒绝；逐字输入设备名确认 |
 | `backup` | `src?, dst, delete?, dry_run?` | 写 | rsync 同步；拒写承载 payload/根的盘（含同一物理盘）；`--delete` 要求 `dst` 是挂载点；确认后执行 |
 | `gen_autoinstall` | `image, disk, partitions[], output?, username?, hostname?, password_hash?, locale?, timezone?` | 写 | 按 curtin schema 确定性拼装（选盘用 serial、挂载用卷标）；只写 payload_dir 内；镜像须存在、目标盘须非 `protected` |
 

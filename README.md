@@ -29,7 +29,7 @@ AI 装机的 AI 运行环境与 agent：initramfs + 静态 Go agent + 内置 lla
 | `agent/` | Go 静态 agent（stdlib-only，`CGO_ENABLED=0`）。入口 `main.go`：`--config/--payload/--script/--base-url/--model/--api-key/--mode/--log-dir/--no-reboot` |
 | `agent/internal/{config,llm,session}/` | `ai.json` 配置与校验；OpenAI 兼容客户端（function calling、代理）；会话循环、确认闸门、JSONL+MD 日志 |
 | `agent/internal/tools/` | 11 个工具：`system_probe` `fs_read` `fs_write` `run_command` `ask_user` `schedule_boot` `list_disks` `partition` `format` `backup` `gen_autoinstall` |
-| `agent/internal/disk/` | 磁盘业务层（供 agent 工具与将来的 TUI/GTK/WebUI 复用）：块设备枚举、受保护设备判定、parted/mke2fs/rsync 命令拼装与参数白名单，返回结构化 JSON |
+| `agent/internal/disk/` | 磁盘业务层（供 agent 工具与将来的 TUI/GTK/WebUI 复用）：块设备枚举、受保护设备判定、parted/mke2fs/mkfs.exfat/mkntfs/mkfs.f2fs/rsync 命令拼装与参数白名单（文件系统差异集中在 `fsSpecs` 一张表），返回结构化 JSON |
 | `agent/internal/screen/` | 用户态自绘屏幕：VTF1 点阵字体（GNU Unifont 生成）+ 网格终端仿真 + fb 画布 + raw 行编辑 + 拼音输入法客户端 |
 | `ime/` | 拼音输入法 helper：`pinyin-ime.cpp`（libgooglepinyin 静态封装）、`build.sh`、`LICENSE`（Apache-2.0） |
 | `init/` | initramfs PID 1：`init`（挂载 → 加载模块 → 挂数据分区 → 本地模型（可选）→ DHCP → 运行 agent → 关机）、`mount_payload.sh`（挂载含 `/ventoy` 的分区到 `/iso`）、`udhcpc.script` |
@@ -46,8 +46,8 @@ AI 装机的 AI 运行环境与 agent：initramfs + 静态 Go agent + 内置 lla
 | `defaults.sh` | 构建路径解析层（其余脚本 source）：位置参数 > `VTOY_AI_*` 环境变量 > `~/.config/ventoy-ai/defaults.sh` > 仓库外内置默认；并给出 QEMU 资源默认值（KVM/内存/CPU） |
 | `build_busybox.sh` | 编译 x86_64 静态 busybox（默认下载官方源码包 + SHA256 校验） |
 | `fetch_kernel.sh` | 下载 Ubuntu 26.04 发行版内核（linux-image + linux-modules，SHA256 固定），按 `kernel-modules.list` 裁剪模块（`.ko.zst` → `.ko`） |
-| `kernel-modules.list` | 随 initramfs 携带的模块清单（存储/文件系统/网卡/输入/显示，依赖闭包 59 个） |
-| `build_tools.sh` | 静态编译分区/格式化/备份工具链：e2fsprogs 1.47.0 + parted 3.6 + rsync 3.2.7（源码 SHA256 固定） |
+| `kernel-modules.list` | 随 initramfs 携带的模块清单（存储/文件系统/网卡/输入/显示，依赖闭包 63 个） |
+| `build_tools.sh` | 静态编译分区/格式化/备份工具链 13 个二进制：e2fsprogs 1.47.0 + parted 3.6 + rsync 3.2.7 + exfatprogs 1.4.3 + f2fs-tools 1.16.0 + ntfs-3g 2021.8.22（源码 SHA256 固定） |
 | `build_llama.sh` | 静态编译 llama-server 本地推理后端（`v3`=x86-64-v3/AVX2 默认、`v2`=SSE4.2 老 CPU；固定 llama.cpp 提交 + 归档 SHA256 校验） |
 | `make_font.sh` | unifont.hex → `$BUILD/screen/font.bin`（随 initramfs 分发；缺字体时 pack_env.sh 自动调用） |
 | `pack_env.sh` | 打包 initramfs：init + agent + 裁剪模块树 + 点阵字体 + 输入法 + 工具链 + 本地推理后端（字体缺失时自动生成；其余缺失只警告） |
@@ -100,7 +100,9 @@ $AI/pack/fetch_kernel.sh
 #    libgooglepinyin（Apache-2.0）全静态编译；缺失时 pack_env.sh 只警告，agent 降级为无输入法
 sh $AI/ime/build.sh
 
-# 5) 分区/格式化/备份工具链（可选，但推荐；产物 $BUILD/tools/{mke2fs,e2fsck,resize2fs,tune2fs,dumpe2fs,parted,rsync}）
+# 5) 分区/格式化/备份工具链（可选，但推荐；产物 $BUILD/tools/ 的 13 个静态二进制：
+#    mke2fs e2fsck resize2fs tune2fs dumpe2fs parted rsync
+#    mkfs.exfat fsck.exfat mkfs.f2fs fsck.f2fs mkntfs ntfsfix）
 #    源码包下载进 $BUILD/dl/ 缓存，重跑不重复下载
 sh $AI/pack/build_tools.sh
 
@@ -143,7 +145,9 @@ QEMU（x86_64）与真机 U 盘均已验证：启动 → 挂载数据分区 → 
 - 自动化回归多用 mock LLM；真实模型端点（Qwen 系列）已在真机跑通，其它厂商端点的 function calling 兼容性未逐一验证
 - 仅在 x86_64 上验证（QEMU + 真机 U 盘）；ARM64 平台未测
 - 尚未把 T3 菜单项接入 `INSTALL/grub/grub.cfg` 与构建流程（`INSTALL` / `GRUB2` 打包）
-- 磁盘工具目前只格式化 ext2/3/4/vfat（未内置 exFAT/NTFS 工具）；对**真实 U 盘本身**的 partition/format/backup 端到端（含拔插）未测
+- 磁盘工具可格式化 ext2/3/4、vfat、exfat、ntfs、f2fs；HFS+ 与 XFS 只能读写挂载（Linux 端没有可用的
+  创建工具 / xfsprogs 未随包），APFS 与 ReFS 整体不支持 —— 逐类口径见[文件系统支持矩阵](docs/工具与安全.md#文件系统支持矩阵)。
+  对**真实 U 盘本身**的 partition/format/backup 端到端（含拔插）未测
 - `direct` 模式（跳过确认）与密钥加密存储、`/undo` 之外的回滚策略未做端到端验证
 - 本地模型：GGUF **不入 ISO**（放数据分区 `/ventoy/ai/models/`，需 ~4.5GB 内存跑 4B-Q4 级模型）；
   内置二进制默认 v3（AVX2），无 AVX2 的老 CPU 需换 v2 变体（随 Release 分发或自行编译）；推理速度取决于机器
@@ -169,6 +173,9 @@ QEMU（x86_64）与真机 U 盘均已验证：启动 → 挂载数据分区 → 
 | e2fsprogs 1.47.0 | GPL-2.0-or-later / LGPL-2.1（libuuid） | `pack/build_tools.sh`（kernel.org 源码，SHA256 校验） |
 | GNU parted 3.6 | GPL-3.0-or-later | 同上（libuuid 取自 e2fsprogs 源树，libblkid 静态链接宿主库） |
 | rsync 3.2.7 | GPL-3.0-only | 同上（内置 popt/zlib 源码树） |
+| exfatprogs 1.4.3 | GPL-2.0-only | 同上（`mkfs.exfat` / `fsck.exfat`，可选外部依赖全部关掉） |
+| f2fs-tools 1.16.0 | GPL-2.0-only（`lib/`、`libf2fs*`、`f2fs_fs.h` 为 LGPL-2.1 双证） | 同上（`mkfs.f2fs` / `fsck.f2fs`；tarball 无 `configure`，需宿主 `autoreconf -fi`） |
+| ntfs-3g 2021.8.22 | GPL-2.0-or-later（NTFS 组件与 libntfs-3g；fuse-lite 为 LGPL-2.0） | 同上，**只取 `mkntfs` / `ntfsfix`**（`--disable-ntfs-3g`），挂载读写用内核 ntfs3，产物里没有 FUSE |
 | llama.cpp（llama-server） | MIT | `pack/build_llama.sh` 固定提交源码静态编译（v3 随 initramfs 内置，v2 供老 CPU） |
 | GRUB（standalone 引导器） | GPL-3.0-or-later | `pack/make_iso.sh` 调宿主 `grub-mkstandalone` |
 
