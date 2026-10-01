@@ -67,6 +67,7 @@ AI 装机的 AI 运行环境与 agent：initramfs + 静态 Go agent + 内置 lla
 | `verify_disk_tools.sh` | guest 内实测受守卫磁盘工具（mock LLM 剧本，30 项断言） |
 | `verify_install_loop.sh` | 「AI 建房 → 目标发行版读盘 → 真实引导」闭环（修前/修后对照） |
 | `verify_target_image.sh` | 已安装目标盘的「能启动」静态判据（只读取证） |
+| `verify_late_payload.sh` | 载荷盘时序回归：U 盘延迟热插 + 内置盘带弱标记，断言挂的是 U 盘且证据只落 U 盘 |
 
 ## 构建（rootless，全部在仓库外构建）
 
