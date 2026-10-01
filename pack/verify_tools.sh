@@ -1,5 +1,10 @@
 #!/bin/sh
-# guest 内实测内置工具链：mke2fs/e2fsck/resize2fs/tune2fs/dumpe2fs/parted/rsync。
+# guest 内实测内置工具链：mke2fs/e2fsck/resize2fs/tune2fs/dumpe2fs/parted/rsync
+#                                + mkfs.exfat/fsck.exfat + mkfs.f2fs/fsck.f2fs + mkntfs/ntfsfix。
+# 每种格式都跑完整闭环：建分区 → mkfs → blkid 回读 TYPE → 挂载读写 → 拷文件 → umount。
+#
+# 取证约定：脚本模式会把 !命令原样回显进日志，所以标记必须取自工具/内核的真实输出；
+#           「已挂载」一律核对 /proc/mounts 里的「设备 挂载点 类型」三元组，不能只 grep 挂载点。
 #
 # 原理：agent 的脚本模式把行首为 ! 的输入当本地命令直执（复用 run_command 安全层），
 #       且脚本模式下确认自动通过。因此用一份「纯 !命令」脚本即可在 guest 内跑完整套
@@ -36,7 +41,12 @@ cat > "$SCRIPT" <<'EOF'
 !mkfs.ext4 -V
 !rsync --version
 !parted -s /dev/vdb mklabel gpt
-!parted -s /dev/vdb mkpart primary ext4 1MiB 100%
+!parted -s /dev/vdb mkpart primary ext4 1MiB 60MiB
+!parted -s /dev/vdb mkpart exfat 60MiB 110MiB
+!parted -s /dev/vdb set 2 msftdata on
+!parted -s /dev/vdb mkpart f2fs f2fs 110MiB 170MiB
+!parted -s /dev/vdb mkpart data ntfs 170MiB 100%
+!parted -s /dev/vdb set 4 msftdata on
 !mdev -s
 !lsmod
 !parted -s /dev/vdb print
@@ -47,12 +57,41 @@ cat > "$SCRIPT" <<'EOF'
 !dumpe2fs -h /dev/vdb1
 !mkdir -p /mnt/t
 !mount /dev/vdb1 /mnt/t
+!grep vdb1 /proc/mounts
 !df -h /mnt/t
 !cp /iso/ventoy/ai.json /mnt/t/copied.json
 !rsync -av /iso/ventoy/ /mnt/t/ventoy-backup/
 !ls /mnt/t/ventoy-backup
 !ls /mnt/t/ventoy-backup/ai
 !umount /mnt/t
+!mkfs.exfat -L EXPART /dev/vdb2
+!blkid /dev/vdb2
+!fsck.exfat /dev/vdb2
+!mkdir -p /mnt/e
+!mount -t exfat /dev/vdb2 /mnt/e
+!grep vdb2 /proc/mounts
+!cp /iso/ventoy/ai.json /mnt/e/ai.json
+!ls /mnt/e
+!umount /mnt/e
+!mkfs.f2fs -l ANDROIDP /dev/vdb3
+!blkid /dev/vdb3
+!fsck.f2fs -t /dev/vdb3
+!mkdir -p /mnt/f
+!mount -t f2fs /dev/vdb3 /mnt/f
+!grep vdb3 /proc/mounts
+!cp /iso/ventoy/ai.json /mnt/f/ai.json
+!ls /mnt/f
+!umount /mnt/f
+!mkntfs -V
+!mkntfs -f -F -L WIN /dev/vdb4
+!blkid /dev/vdb4
+!ntfsfix -n /dev/vdb4
+!mkdir -p /mnt/n
+!mount -t ntfs3 /dev/vdb4 /mnt/n
+!grep vdb4 /proc/mounts
+!cp /iso/ventoy/ai.json /mnt/n/ai.json
+!ls /mnt/n
+!umount /mnt/n
 EOF
 
 # ---------- 2. payload 盘（脚本模式，指向上面的脚本）----------
@@ -62,7 +101,7 @@ VTOY_AI_WITH_SCRIPT=1 VTOY_AI_SCRIPT_FILE="$SCRIPT" \
 
 # ---------- 3. 靶盘 ----------
 rm -f "$SCRATCH"
-truncate -s 64M "$SCRATCH"
+truncate -s 256M "$SCRATCH"
 
 # ---------- 4. 非交互启动，串口落盘 ----------
 rm -f "$LOG"
@@ -106,10 +145,31 @@ check "Pass 5: Checking group summary information" "e2fsck 五遍检查跑完"
 check "non-contiguous),"      "e2fsck 报告文件系统状态"
 check "^hfsplus"              "lsmod 有 hfsplus（macOS 目标盘可读写）"
 check "^f2fs"                 "lsmod 有 f2fs（Android 目标盘可读写）"
-check "/dev/vdb1"                  "df 显示已挂载的 /dev/vdb1"
+check "/dev/vdb1 /mnt/t ext4"        "内核 mounts 表：/dev/vdb1 已挂载为 ext4"
 check "sending incremental file list" "rsync 开始传输"
 check "sent .* bytes"              "rsync 传输完成（有字节数汇总）"
 check "test_script.txt"            "rsync 复制后目标目录含源文件（ls 输出）"
+# ---- exFAT（Windows/macOS/Android 通用数据盘）----
+check "exfatprogs version : 1.4"   "mkfs.exfat/fsck.exfat 版本（静态二进制可执行）"
+check "exFAT format complete!"     "mkfs.exfat 实际建出 exFAT"
+check 'TYPE="exfat"'               "busybox blkid 回读 TYPE=exfat"
+check "clean. directories"         "fsck.exfat 检查跑完"
+check "/dev/vdb2 /mnt/e exfat"     "内核 mounts 表：/dev/vdb2 已挂载为 exfat"
+# ---- f2FS（Android 内部存储/OTG）----
+check "F2FS-tools: mkfs.f2fs Ver: 1.16.0" "mkfs.f2fs 版本（静态二进制可执行）"
+check "Info: Label = ANDROIDP"     "mkfs.f2fs 写卷标"
+check 'TYPE="f2fs"'                "busybox blkid 回读 TYPE=f2fs"
+check "Info: CKPT version"         "fsck.f2fs 读到 f2fs 超级块"
+check "/dev/vdb3 /mnt/f f2fs"      "内核 mounts 表：/dev/vdb3 已挂载为 f2fs"
+# ---- NTFS（Windows 数据盘；挂载读写用内核 ntfs3）----
+check "mkntfs v2021.8.22"          "mkntfs/ntfsfix 版本（静态二进制可执行）"
+check "mkntfs completed successfully" "mkntfs 实际建出 NTFS（-f 快格式，不整卷写零）"
+check 'TYPE="ntfs"'                "busybox blkid 回读 TYPE=ntfs"
+check "NTFS volume version is 3.1" "ntfsfix 读到 NTFS 卷"
+check "was processed successfully" "ntfsfix 检查通过"
+check "/dev/vdb4 /mnt/n ntfs3"     "内核 mounts 表：/dev/vdb4 已挂载为 ntfs3"
+# ---- GPT 分区类型：exfat 段用 msftdata 标志（agent 的推导规则）----
+check "msftdata"                   "parted print 显示 msftdata 标志（Windows 可识别的基本数据盘）"
 # 动态链接器加载失败的特征串（缺库/架构不符）；命中即说明有二进制没跑起来。
 if grep -aqE "error while loading shared libraries|cannot execute binary file|Exec format error" "$LOG"; then
     printf '  FAIL  日志中出现可执行文件加载错误\n'

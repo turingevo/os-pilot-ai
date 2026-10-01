@@ -5,6 +5,9 @@
 #   e2fsprogs : mke2fs e2fsck resize2fs tune2fs dumpe2fs   ext2/3/4 的建/检/调
 #   parted    : parted                                    脚本化分区（GPT/MBR）
 #   rsync     : rsync                                     增量备份
+#   exfatprogs: mkfs.exfat fsck.exfat                     exFAT 的建/检（Win+mac+Android 通用）
+#   f2fs-tools: mkfs.f2fs fsck.f2fs                       f2fs 的建/检（Android）
+#   ntfs-3g   : mkntfs ntfsfix                            NTFS 的建/修（挂载读写用内核 ntfs3，不装 FUSE 驱动）
 #
 # 用法: build_tools.sh [输出目录]
 # 环境变量:
@@ -16,6 +19,9 @@
 #     rsync/parted 用 Ubuntu .dsc 与 GNU 发布值记录下来的同一份。
 #   - 依赖只走源码自带件，不依赖宿主开发包：rsync 用内置 popt/zlib；
 #     parted 的 libuuid 用 e2fsprogs 自己那份（因此 e2fsprogs 必须先编）。
+#   - exfatprogs/f2fs-tools 的可选外部依赖（uuid/blkid/lz4/lzo/selinux）一律关掉，
+#     保持零依赖；f2fs-tools 与 ntfs-3g 的上游 tarball 不含 configure，需要宿主 autoreconf -fi
+#     （ntfs-3g 另需一份 libgcrypt 桩宏，见其构建段注释）。
 #   - 体积优先：-Os + --gc-sections + strip（比默认构建小约 40%，initramfs 直接受益）。
 set -e
 
@@ -39,8 +45,20 @@ PARTED_VER="3.6"
 PARTED_SHA="3b43dbe33cca0f9a18601ebab56b7852b128ec1a3df3a9b30ccde5e73359e612"
 PARTED_URL="https://ftp.gnu.org/gnu/parted/parted-$PARTED_VER.tar.xz"
 
+EXFATPROGS_VER="1.4.3"
+EXFATPROGS_SHA="57226a8ec1bfbce06d68a42cde8cd980414a9457882e691fbce4a4f86c8d5f08"
+EXFATPROGS_URL="http://archive.ubuntu.com/ubuntu/pool/main/e/exfatprogs/exfatprogs_${EXFATPROGS_VER}.orig.tar.xz"
+
+F2FS_VER="1.16.0"
+F2FS_SHA="fe25b17422f278e5fc0c6ae9977d814fe3122b5bc82dd92a58296fad57263d9c"
+F2FS_URL="http://archive.ubuntu.com/ubuntu/pool/universe/f/f2fs-tools/f2fs-tools_${F2FS_VER}.orig.tar.xz"
+
+NTFS_VER="2021.8.22"
+NTFS_SHA="5cb9fa93bf2b9685e3f1b598861f6082786e76562989a5752c7379dbe0e989a2"
+NTFS_URL="http://archive.ubuntu.com/ubuntu/pool/main/n/ntfs-3g/ntfs-3g_${NTFS_VER}.orig.tar.gz"
+
 # 期望产物；都在且未强制重建就直接收工
-WANT="mke2fs e2fsck resize2fs tune2fs dumpe2fs parted rsync"
+WANT="mke2fs e2fsck resize2fs tune2fs dumpe2fs parted rsync mkfs.exfat fsck.exfat mkfs.f2fs fsck.f2fs mkntfs ntfsfix"
 if [ "${VTOY_AI_TOOLS_FORCE:-0}" != "1" ]; then
     all=1
     for b in $WANT; do [ -x "$TOOLS/$b" ] || all=0; done
@@ -125,6 +143,73 @@ CFLAGS="$CFLAGS_OPT" ./configure \
 make -j"$JOBS" LDFLAGS="$LDFLAGS_OPT" >/dev/null
 cp "$RSYNC_SRC/rsync" "$TOOLS/rsync"
 strip "$TOOLS/rsync"
+
+# ---------- exfatprogs（exFAT：Windows / macOS / Android 13+ 都能读写的通用数据盘格式）----------
+# 同 parted 的坑：libtool 链接时会吃掉 LDFLAGS 里的 -static，必须在 make 时补 -all-static，
+# 否则产物是动态链接（initramfs 里没有 libc，到 guest 里跑不起来）。
+fetch "exfatprogs-$EXFATPROGS_VER.tar.xz" "$EXFATPROGS_URL" "$EXFATPROGS_SHA"
+unpack "exfatprogs-$EXFATPROGS_VER" "exfatprogs-$EXFATPROGS_VER.tar.xz" "-xf"
+EXFAT_SRC="$SRC_ROOT/exfatprogs-$EXFATPROGS_VER"
+echo "[tools] 编译 exfatprogs $EXFATPROGS_VER ..."
+cd "$EXFAT_SRC"
+CFLAGS="$CFLAGS_OPT" LDFLAGS="-static -Wl,--gc-sections" \
+    ./configure --disable-shared --enable-static >/dev/null
+make -j"$JOBS" LDFLAGS="-static -all-static -Wl,--gc-sections" >/dev/null
+cp "$EXFAT_SRC/mkfs/mkfs.exfat" "$TOOLS/mkfs.exfat"
+cp "$EXFAT_SRC/fsck/fsck.exfat" "$TOOLS/fsck.exfat"
+strip "$TOOLS/mkfs.exfat" "$TOOLS/fsck.exfat"
+
+# ---------- f2fs-tools（f2fs：Android 内部存储与 OTG 盘）----------
+# 上游 tarball 不带 configure，需要 autoreconf -fi；可选外部依赖全部关掉，
+# 保证产物零依赖（uuid 关掉后 mkfs.f2fs 自己生成随机 UUID）。
+command -v autoreconf >/dev/null || {
+    echo "[tools] 需要 autoreconf（apt install autoconf automake libtool）" >&2; exit 1; }
+fetch "f2fs-tools-$F2FS_VER.tar.xz" "$F2FS_URL" "$F2FS_SHA"
+unpack "f2fs-tools-$F2FS_VER" "f2fs-tools-$F2FS_VER.tar.xz" "-xf"
+F2FS_SRC="$SRC_ROOT/f2fs-tools-$F2FS_VER"
+echo "[tools] 编译 f2fs-tools $F2FS_VER ..."
+cd "$F2FS_SRC"
+autoreconf -fi >/dev/null
+ac_cv_lib_uuid_uuid_clear=no ac_cv_header_uuid_uuid_h=no \
+CFLAGS="$CFLAGS_OPT" LDFLAGS="-static -Wl,--gc-sections" \
+    ./configure --disable-shared --enable-static \
+    --without-blkid --without-lz4 --without-lzo2 --without-selinux >/dev/null
+make -j"$JOBS" LDFLAGS="-static -all-static -Wl,--gc-sections" >/dev/null
+cp "$F2FS_SRC/mkfs/mkfs.f2fs" "$TOOLS/mkfs.f2fs"
+cp "$F2FS_SRC/fsck/fsck.f2fs" "$TOOLS/fsck.f2fs"
+strip "$TOOLS/mkfs.f2fs" "$TOOLS/fsck.f2fs"
+
+# ---------- ntfs-3g（只取 mkntfs + ntfsfix）----------
+# 挂载读写由内核 ntfs3 负责，这里不装 FUSE 驱动（--disable-ntfs-3g），所以源码里内置的
+# libfuse-lite 只会用来满足编译期引用，产物里没有 fuse。
+# 两个坑：
+#   1. tarball 不带 configure，要 autoreconf -fi；上游 configure.ac 里的 AM_PATH_LIBGCRYPT
+#      只在 --enable-crypto 时才真正执行，但宏本身必须在 autoconf 期可展开——宿主没装
+#      libgcrypt 的开发件（缺 libgcrypt.m4）时用下面这份"只走未找到分支"的桩宏顶上。
+#   2. ntfsfix 依赖 default device io ops，不能加 --disable-device-default-io-ops。
+fetch "ntfs-3g-$NTFS_VER.tar.gz" "$NTFS_URL" "$NTFS_SHA"
+unpack "ntfs-3g-$NTFS_VER" "ntfs-3g-$NTFS_VER.tar.gz" "-xzf"
+NTFS_SRC="$SRC_ROOT/ntfs-3g-$NTFS_VER"
+echo "[tools] 编译 ntfs-3g $NTFS_VER（mkntfs / ntfsfix）..."
+cd "$NTFS_SRC"
+mkdir -p "$SRC_ROOT/ntfs-stub-m4"
+cat > "$SRC_ROOT/ntfs-stub-m4/libgcrypt-stub.m4" <<'M4'
+dnl AM_PATH_LIBGCRYPT 的构建期桩：展开成"未找到"分支即可。
+dnl 上游只在 --enable-crypto 时才真正探测 libgcrypt，本脚本从不启用加密件。
+AC_DEFUN([AM_PATH_LIBGCRYPT], [m4_default([$3], [:])])
+M4
+if ! ACLOCAL="aclocal -I $SRC_ROOT/ntfs-stub-m4" autoreconf -fi >/dev/null 2>&1; then
+    echo "[tools] ntfs-3g autoreconf 失败" >&2
+    exit 1
+fi
+CFLAGS="$CFLAGS_OPT" LDFLAGS="-static -Wl,--gc-sections" \
+    ./configure --disable-ntfs-3g --enable-ntfsprogs --with-fuse=internal \
+    --disable-posix-acls --disable-xattr-mappings --disable-plugins \
+    --disable-mtab --disable-shared --enable-static >/dev/null
+make -j"$JOBS" LDFLAGS="-static -all-static -Wl,--gc-sections" >/dev/null
+cp "$NTFS_SRC/ntfsprogs/mkntfs" "$TOOLS/mkntfs"
+cp "$NTFS_SRC/ntfsprogs/ntfsfix" "$TOOLS/ntfsfix"
+strip "$TOOLS/mkntfs" "$TOOLS/ntfsfix"
 
 # ---------- 校验：必须是静态链接，且能跑起来 ----------
 echo "[tools] 产物校验:"

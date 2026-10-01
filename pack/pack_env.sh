@@ -44,13 +44,18 @@ chmod 755 "$ENV_DIR/bin/busybox"
 # /bin 优先；而且 busybox 的 mke2fs/mkfs.ext2/fsck 符号链接也在 /bin，必须盖掉。
 # 坑：cp 会穿透符号链接写到 busybox 本体上，所以先 rm 再 cp。
 TOOLS_DIR="${VTOY_AI_TOOLS_DIR:-$BUILD/tools}"
-TOOLS_LIST="mke2fs e2fsck resize2fs tune2fs dumpe2fs parted rsync"
+TOOLS_LIST="mke2fs e2fsck resize2fs tune2fs dumpe2fs parted rsync mkfs.exfat fsck.exfat mkfs.f2fs fsck.f2fs mkntfs ntfsfix"
 if [ -x "$TOOLS_DIR/mke2fs" ]; then
+    installed="" missing=""
     for t in $TOOLS_LIST; do
-        [ -x "$TOOLS_DIR/$t" ] || continue
+        if [ ! -x "$TOOLS_DIR/$t" ]; then
+            missing="$missing $t"
+            continue
+        fi
         rm -f "$ENV_DIR/bin/$t"
         cp "$TOOLS_DIR/$t" "$ENV_DIR/bin/$t"
         chmod 755 "$ENV_DIR/bin/$t"
+        installed="$installed $t"
     done
     # 别名：mke2fs/e2fsck 按 argv[0] 判断做哪种文件系统，必须有这些名字
     for a in mkfs.ext2 mkfs.ext3 mkfs.ext4 fsck.ext2 fsck.ext3 fsck.ext4; do
@@ -59,7 +64,10 @@ if [ -x "$TOOLS_DIR/mke2fs" ]; then
             fsck.*) ln -sf e2fsck "$ENV_DIR/bin/$a" ;;
         esac
     done
-    echo "[pack_env] 已装入工具链: $(cd "$TOOLS_DIR" && ls | tr '\n' ' ')"
+    echo "[pack_env] 已装入工具链:$installed"
+    if [ -n "$missing" ]; then
+        echo "[pack_env] 警告: 工具链缺$missing（对应的文件系统能力会自动降级）" >&2
+    fi
 else
     echo "[pack_env] 警告: 未找到工具链 $TOOLS_DIR（可运行 pack/build_tools.sh 生成）" >&2
 fi
