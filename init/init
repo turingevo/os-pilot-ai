@@ -15,39 +15,100 @@ mount -t tmpfs none /tmp 2>/dev/null
 
 mdev -s 2>/dev/null
 
+# ---------- 调试记录 ----------
+# init 的每行输出同时进控制台（人在看）与 RAM 副本（永不失败），数据分区挂上后再统一
+# 落到 U 盘的 boot-*.log。真机没有串口、掉电即失忆，盘上那份文件是唯一现场证据，
+# 所以这份冗余是刻意设计，不是调试残留。
+RAMLOG=/tmp/init.log
+BOOTLOG=""                       # 数据分区可写后指向 /iso/ventoy/ai/logs/boot-*.log
+note() {                         # 双写：RAM 副本 + 控制台
+    printf '%s\n' "$*" >> "$RAMLOG" 2>/dev/null
+    printf '%s\n' "$*" > /dev/console
+}
+capture() {                      # 跑子命令：输出进 RAM+控制台，且保留其退出码
+    local out=/tmp/capture.out
+    "$@" > "$out" 2>&1
+    local r=$?
+    cat "$out" >> "$RAMLOG" 2>/dev/null
+    cat "$out"
+    return $r
+}
+SYNCED_BYTES=0
+syncToDisk() {                   # RAM 副本增量并入 U 盘日志；/iso 不可写时静默跳过
+    [ -n "$BOOTLOG" ] || return 0
+    cur=$(wc -c < "$RAMLOG" 2>/dev/null) || return 0
+    [ -n "$cur" ] || return 0
+    if [ "$cur" -gt "$SYNCED_BYTES" ]; then
+        tail -c +$((SYNCED_BYTES + 1)) "$RAMLOG" >> "$BOOTLOG" 2>/dev/null
+        SYNCED_BYTES=$cur
+    fi
+}
+note "[init] ===== AI 环境启动 ====="
+
 # ---------- loopback（本地推理/本机 HTTP 需要 127.0.0.1）----------
 ifconfig lo 127.0.0.1 up 2>/dev/null
-echo "[init] loopback: $(ifconfig lo 2>/dev/null | grep -o 'inet addr:[0-9.]*' | head -1)"
+note "[init] loopback: $(ifconfig lo 2>/dev/null | grep -o 'inet addr:[0-9.]*' | head -1)"
+# 时钟三读并列：guest 无 NTP，RTC 若被 Windows 按本地时间写入，内核会当成 UTC ⇒ 日志
+# 时间整体偏 8 小时。把原始值一起留档，判读盘上日志时间时不再靠猜。
+note "[init] 时钟: 内核UTC $(date -u '+%Y-%m-%dT%H:%M:%SZ') | RTC按UTC $(hwclock -r -u 2>/dev/null || echo 不可读) | RTC按本地 $(hwclock -r 2>/dev/null || echo 不可读)"
 
 # ---------- 内核模块（发行版内核：存储/文件系统/网卡/输入/显示）----------
 # 清单来自打包时的 pack/kernel-modules.list，模块为解压态 .ko（busybox 不支持 .ko.zst）。
 # 必须在挂载数据分区与 DHCP 之前加载，否则看不到 /dev/sd*、/dev/nvme* 和网卡。
 if [ -f /ventoy/ai/kernel-modules.list ]; then
-    echo "[init] 加载内核模块..."
+    note "[init] 加载内核模块..."
     while read -r m; do
         case "$m" in ''|'#'*) continue ;; esac
         modprobe "$m" 2>/dev/null
     done < /ventoy/ai/kernel-modules.list
 fi
 
-# 等待块设备枚举（模块刚加载，分区节点可能稍后出现）
-n=0
-while [ $n -lt 40 ]; do
-    found=0
-    for p in /sys/class/block/*/partition; do
-        if [ -e "$p" ]; then found=1; break; fi
-    done
-    [ "$found" = "1" ] && break
-    sleep 0.25
-    n=$((n + 1))
-done
-
 # ---------- 挂载 Ventoy 数据分区到 /iso ----------
-echo "[init] 查找 Ventoy 数据分区..."
-if /ventoy/ai/mount_payload.sh; then
-    echo "[init] 数据分区已挂载到 /iso"
+# 真机上 U 盘要等 usb-storage/uas 加载完 + 一次 SCSI 扫描才会出现，而内置硬盘在 init
+# 跑起来之前就有分区 ⇒ 判断标准不能是「看到任意分区」，只能是「载荷分区到底挂上没挂上」，
+# 挂不上就隔 1s 重试到超时。QEMU 用 virtio/IDE 直挂磁盘时设备秒现，这类时序缺陷只在真机暴露。
+PAYLOAD_WAIT="${VTOY_AI_PAYLOAD_WAIT:-25}"
+note "[init] 查找 Ventoy 数据分区（最多等 ${PAYLOAD_WAIT}s）..."
+wait_s=0
+PAYLOAD_OK=0
+while :; do
+    mdev -s 2>/dev/null          # 补 /dev 节点：内核未开 devtmpfs 或节点滞后时需要
+    if /ventoy/ai/mount_payload.sh >/tmp/mp.out 2>&1; then
+        PAYLOAD_OK=1
+        break
+    fi
+    wait_s=$((wait_s + 1))
+    [ $wait_s -ge "$PAYLOAD_WAIT" ] && break
+    if [ $((wait_s % 5)) -eq 0 ]; then
+        note "[init] 还没挂上（已等 ${wait_s}s，块设备: $(ls /sys/class/block 2>/dev/null | tr '\n' ' ')）"
+    fi
+    sleep 1
+done
+note "[init] 块设备: $(ls /sys/class/block 2>/dev/null | tr '\n' ' ')"
+note "[init] 分区探测: $(cat /tmp/mp.out 2>/dev/null | tr '\n' '; ')"
+
+if [ "$PAYLOAD_OK" = "1" ]; then
+    note "[init] 数据分区已挂载到 /iso（等 ${wait_s}s）"
+    if mkdir -p /iso/ventoy/ai/logs 2>/dev/null; then
+        BOOTLOG="/iso/ventoy/ai/logs/boot-$(date -u +%Y%m%d-%H%M%SZ).log"
+        {
+            echo "===== os-pilot-ai 启动日志（guest 时钟，未做时区校正；见「时钟:」行自证）====="
+            echo "kernel    = $(uname -r)"
+            echo "cmdline   = $(cat /proc/cmdline 2>/dev/null)"
+            echo "cpu       = $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ //') | 核 $(grep -c ^processor /proc/cpuinfo) | avx2=$(grep -q avx2 /proc/cpuinfo && echo yes || echo no)"
+            echo "mem       = $(awk '/^MemTotal:/{print int($2/1024)" MB"}' /proc/meminfo)"
+            echo "blkid     = $(blkid 2>/dev/null | tr '\n' ' ')"
+        } > "$BOOTLOG" 2>/dev/null
+        syncToDisk                      # 立刻落一次盘：后面若卡死/崩溃，前段证据已在盘上
+        note "[init] 本次启动日志: $BOOTLOG"
+    else
+        note "[init] 警告: /iso/ventoy/ai/logs 不可写，本次只留 RAM 副本（关机前不再落盘）"
+    fi
 else
-    echo "[init] 警告: 未找到可用的 Ventoy 数据分区，/iso 为空"
+    note "[init] 警告: 等 ${wait_s}s 仍未找到数据分区（看它带不带 ventoy/ai 或 ventoy/ai.json），/iso 为空"
+    note "       这种情况下盘上不会有任何日志；把下面这行贴回来即可定位："
+    note "       $(ls /sys/class/block 2>/dev/null | tr '\n' ' ')"
+    BOOTLOG=""
 fi
 
 # ---------- 网络（DHCP） ----------
@@ -59,7 +120,7 @@ for f in /sys/class/net/*; do
     break
 done
 if [ -n "$IFACE" ]; then
-    echo "[init] 网络接口 $IFACE，启动 DHCP..."
+    note "[init] 网络接口 $IFACE，启动 DHCP..."
     udhcpc -i "$IFACE" -s /ventoy/ai/udhcpc.script -b -t 8 -T 3 2>/dev/null
     n=0
     while [ $n -lt 20 ]; do
@@ -69,16 +130,16 @@ if [ -n "$IFACE" ]; then
         sleep 0.5
         n=$((n + 1))
     done
-    echo "[init] 网络: $(ifconfig "$IFACE" 2>/dev/null | grep -o 'inet addr:[0-9.]*' | head -1)"
+    note "[init] 网络: $(ifconfig "$IFACE" 2>/dev/null | grep -o 'inet addr:[0-9.]*' | head -1)"
 fi
 
 # ---------- AI 配置：数据分区上的配置优先 ----------
 if [ -f /iso/ventoy/ai.json ]; then
     cp /iso/ventoy/ai.json /ventoy/ai.json
-    echo "[init] 使用数据分区配置 /iso/ventoy/ai.json"
+    note "[init] 使用数据分区配置 /iso/ventoy/ai.json"
 fi
 if [ ! -f /ventoy/ai.json ]; then
-    echo "[init] 未找到 /iso/ventoy/ai.json（可选）：未配置时自动使用本地模型（如可用）"
+    note "[init] 未找到 /iso/ventoy/ai.json（可选）：未配置时自动使用本地模型（如可用）"
 fi
 
 # ---------- 本地大模型（可选，零配置默认路径）----------
@@ -106,22 +167,27 @@ if [ -f /ventoy/ai.json ]; then
     REMOTE_URL=$(sed -n 's/.*"base_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /ventoy/ai.json | head -n 1)
 fi
 
+LLAMA_REASON=""
 if [ -n "$REMOTE_URL" ]; then
-    echo "[init] 已配置远程服务（$REMOTE_URL），跳过本地模型"
+    LLAMA_REASON="已配置远程服务（$REMOTE_URL）"
+    note "[init] 已配置远程服务（$REMOTE_URL），跳过本地模型"
 elif [ -z "$LLAMA_BIN" ]; then
-    echo "[init] 未找到 llama-server，跳过本地模型（工具 tools/fetch_local_llm.sh 可自动放置）"
+    LLAMA_REASON="未找到 llama-server 二进制"
+    note "[init] 未找到 llama-server，跳过本地模型（工具 tools/fetch_local_llm.sh 可自动放置）"
 elif [ "$MODEL_N" = "0" ]; then
-    echo "[init] 未找到模型 /iso/ventoy/ai/models/*.gguf，跳过本地模型"
-    echo "       可运行 tools/fetch_local_llm.sh 自动下载，或手动放入 GGUF 模型文件"
+    LLAMA_REASON="未找到模型 /iso/ventoy/ai/models/*.gguf"
+    note "[init] 未找到模型 /iso/ventoy/ai/models/*.gguf，跳过本地模型"
+    note "       可运行 tools/fetch_local_llm.sh 自动下载，或手动放入 GGUF 模型文件"
 elif [ "$LLAMA_BIN" = "/ventoy/ai/llama-server" ] && ! grep -q avx2 /proc/cpuinfo; then
-    echo "[init] 本机 CPU 不支持 AVX2，内置 llama-server 无法运行；"
-    echo "       可从 GitHub Release 下载 llama-server.v2 放到 /iso/ventoy/ai/llama-server"
+    LLAMA_REASON="本机 CPU 不支持 AVX2，内置 llama-server 无法运行"
+    note "[init] 本机 CPU 不支持 AVX2，内置 llama-server 无法运行；"
+    note "       可从 GitHub Release 下载 llama-server.v2 放到 /iso/ventoy/ai/llama-server"
 else
-    [ "$MODEL_N" -gt 1 ] && echo "[init] 发现多个模型，使用 $(basename "$MODEL")（按文件名排序取首个）"
+    [ "$MODEL_N" -gt 1 ] && note "[init] 发现多个模型，使用 $(basename "$MODEL")（按文件名排序取首个）"
     EXTRA=""
     if [ -f /iso/ventoy/ai/llama-server.args ]; then
         EXTRA=$(cat /iso/ventoy/ai/llama-server.args)
-        echo "[init] 追加启动参数: $EXTRA"
+        note "[init] 追加启动参数: $EXTRA"
     fi
     # 上下文窗口按内存分档：本类模型是混合注意力（仅 8 层全注意力），KV 实测 32 KiB/token，
     # 8192/16384/32768 分别占 256/512/1024 MiB；另有权重 ~2.6 GiB 与 repack/计算缓冲 ~1.4 GiB。
@@ -134,8 +200,8 @@ else
     elif [ "${MEM_MB:-0}" -ge 5500 ]; then
         CTX=16384
     fi
-    echo "[init] 上下文窗口: $CTX tokens（本机内存 ${MEM_MB:-?} MB）"
-    echo "[init] 启动本地模型: $LLAMA_BIN + $MODEL ..."
+    note "[init] 上下文窗口: $CTX tokens（本机内存 ${MEM_MB:-?} MB）"
+    note "[init] 启动本地模型: $LLAMA_BIN + $MODEL ..."
     "$LLAMA_BIN" -m "$MODEL" \
         --host 127.0.0.1 --port 8069 \
         -c "$CTX" -np 1 --jinja --alias "$(basename "$MODEL" .gguf)" $EXTRA \
@@ -149,9 +215,21 @@ else
             ok=1
             break
         fi
-        if [ ! -d /proc/$LLAMA_PID ]; then
-            echo "[init] llama-server 进程已退出，日志末尾:"
-            tail -n 15 /tmp/llama-server.log
+        # 崩溃的子进程会变成僵尸，/proc/PID 仍然存在 ⇒ 只看目录会在"进程早已死了"的情况下
+        # 白等满 240s。僵尸态同样视为退出，并用 wait 取回退出码/信号。
+        if [ ! -d /proc/$LLAMA_PID ] || grep -q '^State:[[:space:]]*Z' /proc/$LLAMA_PID/status 2>/dev/null; then
+            wait $LLAMA_PID 2>/dev/null
+            llama_rc=$?
+            case $llama_rc in
+                132) llama_why="SIGILL（CPU 指令集不兼容，需换 llama-server 档位）" ;;
+                134) llama_why="SIGABRT（库缺失/断言失败）" ;;
+                137) llama_why="SIGKILL（多为内存不足被内核杀掉，见本日志末尾 dmesg）" ;;
+                139) llama_why="SIGSEGV" ;;
+                *)   llama_why="退出码 $llama_rc" ;;
+            esac
+            note "[init] llama-server 已退出（$llama_why，等待 ${n}s），日志末尾:"
+            capture tail -n 15 /tmp/llama-server.log
+            LLAMA_REASON="llama-server 启动后退出（$llama_why）"
             break
         fi
         sleep 1
@@ -162,10 +240,14 @@ else
         export VTOY_AI_LOCAL_LLM=1
         export VTOY_AI_LOCAL_LLM_URL=http://127.0.0.1:8069/v1
         export VTOY_AI_LOCAL_LLM_MODEL="$(basename "$MODEL" .gguf)"
-        echo "[init] 本地模型就绪（$((ts1 - ts0))s，RSS $(awk '/VmRSS/{print $2" "$3}' /proc/$LLAMA_PID/status 2>/dev/null)）"
+        LLAMA_REASON="本地模型就绪（$((ts1 - ts0))s）"
+        note "[init] 本地模型就绪（$((ts1 - ts0))s，RSS $(awk '/VmRSS/{print $2" "$3}' /proc/$LLAMA_PID/status 2>/dev/null)）"
     else
-        echo "[init] 本地模型未就绪（等待 ${n}s），将依赖远程服务"
-        echo "       若为 CPU 指令集不兼容，可换用 GitHub Release 的 llama-server.v2；日志: /tmp/llama-server.log"
+        if [ -z "$LLAMA_REASON" ]; then
+            LLAMA_REASON="本地模型 ${n}s 内未通过 /health 检查"
+        fi
+        note "[init] ${LLAMA_REASON}，将依赖远程服务"
+        note "       若为 CPU 指令集不兼容，可换用 GitHub Release 的 llama-server.v2；日志: /tmp/llama-server.log"
     fi
 fi
 
@@ -177,21 +259,93 @@ if [ -f /iso/ventoy/ai/test_script.txt ]; then
 fi
 AGENT_OPTS=""
 if [ "$vtoy_ai_interactive" = "1" ]; then
-    echo "[init] 交互模式（vtoy_ai_interactive=1），忽略 test_script.txt"
+    note "[init] 交互模式（vtoy_ai_interactive=1），忽略 test_script.txt"
 elif [ -f /ventoy/ai/test_script.txt ]; then
     AGENT_OPTS="--script /ventoy/ai/test_script.txt --no-reboot"
     export VTOY_AI_NO_REBOOT=1
-    echo "[init] 检测到 test_script.txt，进入脚本模式（no_reboot）"
+    SCRIPT_MODE=1
+    note "[init] 检测到 test_script.txt，进入脚本模式（no_reboot）"
 fi
 
 # ---------- 运行 AI agent ----------
 # 控制台按 UTF-8 处理退格：否则串口下退格中文只删一个字节，行内残留半个字符（无效 UTF-8）
 stty -F /dev/console iutf8 2>/dev/null
-echo "[init] 启动 os-pilot-ai ..."
+note "[init] 启动 os-pilot-ai ..."
 # 标记运行在 AI initramfs 内：agent 据此判断是否允许接管本地显示器（自绘屏幕）
 export VTOY_AI_INITRAMFS=1
+# 把 init 侧的结论交给 agent：agent 的会话日志/致命诊断里会原样引用，
+# 这样盘上的 session-*.md 与 boot-*.log 能互相对上，不必靠时间戳猜。
+export VTOY_AI_BOOT_LOG="$BOOTLOG"
+export VTOY_AI_LOCAL_LLM_REASON="$LLAMA_REASON"
+# agent 的 fatal/session 诊断会引用这份启动日志的末尾，先把已有内容落盘再启动它。
+syncToDisk
 /ventoy/ai/os-pilot-ai $AGENT_OPTS </dev/console >/dev/console 2>&1
 rc=$?
-echo "[init] os-pilot-ai 退出（rc=$rc），系统关机"
+note "[init] ===== os-pilot-ai 退出（rc=$rc）====="
+# 控制台只留一行能读得下的关键量；详细取证写 RAM 副本，随下面的增量落盘进 U 盘。
+note "[init] 内存: $(awk '/^MemTotal:|^MemAvailable:/{gsub(":","",$1); printf "%s=%dMB ", $1, $2/1024}' /proc/meminfo)"
+
+# ---------- 退出前取证 ----------
+# 一开始没挂上时再补一次：真机上 U 盘可能出现得比等待上限还晚（或人是失败后才把盘插回），
+# 临关机前这一次机会决定了这次启动是"全盘无证据"还是"日志完整"。
+if [ "$PAYLOAD_OK" != "1" ] && /ventoy/ai/mount_payload.sh >/tmp/mp.out 2>&1; then
+    note "[init] 补挂成功，把整份 RAM 日志落盘..."
+    mkdir -p /iso/ventoy/ai/logs 2>/dev/null
+    BOOTLOG="/iso/ventoy/ai/logs/boot-$(date -u +%Y%m%d-%H%M%SZ).log"
+    SYNCED_BYTES=0                   # 之前没落过盘，整份 RAM 副本从头并入
+    syncToDisk
+fi
+# 必须在任何可能卡顿的动作之前先落盘：内存吃紧时后续命令本身就可能被杀。
+{
+    echo "----- 退出诊断 rc=$rc $(date -u +%Y-%m-%dT%H:%M:%SZ) -----"
+    echo "free:";       free
+    echo "lsmod:";      lsmod
+    echo "dmesg 末尾:"; dmesg | tail -n 40
+    if [ -f /tmp/llama-server.log ]; then
+        echo "llama-server.log 末尾:"; tail -n 25 /tmp/llama-server.log
+    fi
+} >> "$RAMLOG" 2>/dev/null
+syncToDisk
+sync
+
+case $rc in
+    0) note "[init] 正常结束（任务完成或用户退出）" ;;
+    1) note "[init] 运行期错误：会话初始化失败或会话中断（详见盘上 session-*/fatal-* 与上文）" ;;
+    2) note "[init] 配置错误或内部 panic：模型服务不可用/参数不对（若上文显示本地模型未就绪，说明既无本地推理也无 ai.json 远程服务）" ;;
+    *) if [ "$rc" -gt 128 ]; then
+           note "[init] agent 被信号终止（$((rc - 128))，9=内存不足被内核杀掉，11=段错误，6=abort）"
+       else
+           note "[init] 未预期的退出码 $rc"
+       fi ;;
+esac
+# OOM 单独提醒：本地推理最常见的真机死法，症状是"用着用着突然关机"。
+if dmesg 2>/dev/null | grep -qi "out of memory\|oom-kill\|Killed process"; then
+    note "[init] 检测到内核 OOM 记录：内存不足以同时容纳模型与系统，"
+    note "       可减小上下文/换更小的模型（/iso/ventoy/ai/llama-server.args 写 -c 4096）"
+fi
+syncToDisk
+sync
+
+if [ "$rc" != "0" ] && [ -z "$SCRIPT_MODE" ]; then
+    # 真机一关机证据就没了（RAM 清空、/tmp 是 tmpfs），所以失败时暂停让人看一眼。
+    # agent 可能把终端留在 raw 态/自绘屏幕上，先恢复规范模式，否则提示词看不见、回车也读不到。
+    stty sane 2>/dev/null
+    note "[init] 启动日志: ${BOOTLOG:-未落盘（数据分区不可写）}"
+    if [ -n "$BOOTLOG" ]; then
+        PAUSE=10
+    else
+        # 盘上什么都不会留 ⇒ 这一屏就是唯一证据，给足够时间拍照或另插一支盘把它拷走
+        PAUSE=60
+        note "[init] 本次没有盘上日志。可另插一支 U 盘，按回车进 shell 后拷走 /tmp/init.log："
+        note "       mkdir /mnt/bak && mount -o fmask=0000,dmask=0000 /dev/sdXN /mnt/bak && cp /tmp/init.log /mnt/bak/"
+    fi
+    note "[init] ${PAUSE}s 后关机；按回车进入排查 shell（在里面 exit 继续关机）"
+    if IFS= read -t "$PAUSE" -r _ans </dev/console; then
+        /bin/busybox sh </dev/console >/dev/console 2>&1
+    fi
+fi
+
+note "[init] 系统关机"
+syncToDisk
 sync
 poweroff -f

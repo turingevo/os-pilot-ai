@@ -87,7 +87,8 @@ func (l *Logger) Header(info map[string]string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	fmt.Fprintf(l.md, "# AI 装机助手会话\n\n")
-	for _, k := range []string{"time", "provider", "model", "mode", "payload_dir", "log_dir"} {
+	for _, k := range []string{"time", "provider", "model", "mode", "payload_dir", "log_dir",
+		"local_inference", "boot_log", "local_llm"} {
 		if v, ok := info[k]; ok {
 			fmt.Fprintf(l.md, "- %s: %s\n", k, v)
 		}
@@ -136,6 +137,19 @@ func (l *Logger) Note(text string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	fmt.Fprintf(l.md, "\n> %s\n", text)
+}
+
+// End 与 Header 的 session_start 成对：没有结束事件就分不出"用户正常退出"和
+// "进程被杀/自己崩了"，真机上这两种的表现都是突然关机。
+func (l *Logger) End(code int, reason string) {
+	if l == nil {
+		return
+	}
+	l.event("session_end", map[string]any{"rc": code, "reason": reason})
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	fmt.Fprintf(l.md, "\n> 会话结束：rc=%d %s（%s）\n",
+		code, reason, time.Now().Format("2006-01-02 15:04:05"))
 }
 
 func (l *Logger) Close() {
@@ -511,6 +525,12 @@ func New(cfg *config.Config, client *llm.Client, reg *tools.Registry, script boo
 	}
 	if cfg.LocalInference {
 		header["local_inference"] = "true"
+	}
+	if v := os.Getenv("VTOY_AI_BOOT_LOG"); v != "" {
+		header["boot_log"] = filepath.Base(v) // 与 log_dir 同目录，只报名字即可定位
+	}
+	if v := os.Getenv("VTOY_AI_LOCAL_LLM_REASON"); v != "" {
+		header["local_llm"] = v
 	}
 	logger.Header(header)
 	return s, nil
