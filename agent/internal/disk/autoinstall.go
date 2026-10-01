@@ -15,6 +15,8 @@ import (
 // 所以这里用固定结构拼装，只把用户给的分区方案填进去；盘名/标识、字段名都由代码保证。
 
 // templateFS 是模板里允许出现的文件系统类型（由安装器解释，不经过本包的工具链）。
+// 刻意与 fsSpecs 解耦、只保留 Linux 装机能用的类型：装机根分区不能是 exFAT/NTFS，
+// 若跟着"能格式化的清单"放宽，模型会以为能把系统装进 exFAT 分区。
 var templateFS = map[string]bool{"ext4": true, "ext3": true, "ext2": true, "vfat": true}
 
 // AutoinstallPart 描述目标盘上的一个分区。

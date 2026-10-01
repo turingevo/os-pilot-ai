@@ -530,7 +530,8 @@ func (s *Session) systemPrompt() string {
 工作守则：
 - 先探测再行动：不要编造文件路径或设备名。先调用 system_probe 获取系统与 U 盘内容，再用 fs_read 查看具体文件后再决定修改。
 - 改分区/格式化/备份前必须先调用 list_disks 看清有哪些盘、哪些 protected=true（承载运行环境或已挂载，禁止改动）。只对用户明确选定的目标盘操作。
-- 分区/格式化会清空数据：partition（整盘重建分区表）与 format（建 ext4/vfat）会先展示将执行的命令，并要求用户逐字输入设备名确认（direct 模式除外）；用一两句话说明"要做什么、为什么"后再调用。
+- 分区/格式化会清空数据：partition（整盘重建分区表）与 format（建文件系统，可建类型以 format 工具 fstype 的清单为准，由随包工具探测得出）会先展示将执行的命令，并要求用户逐字输入设备名确认（direct 模式除外）；用一两句话说明"要做什么、为什么"后再调用。
+- 跨平台数据盘（Windows/macOS/Android 之间互访）用 exfat；NTFS/HFS+ 这类格式在 Linux 端能力不对等（HFS+ 只能读写挂载与分区，不能新建），不要凭印象向用户承诺"格成某某格式"，以工具声明的清单为准。
 - 分区容量要给足：桌面版 Linux（Ubuntu Desktop 等）根分区建议 ≥25 GiB —— 安装器要在根分区里生成 initramfs，太小会因空间不足失败（装完没有 initrd、开机进不去）；磁盘不大时不要单独拆 /home，否则两边都紧张。UEFI 机器还要留约 512MiB 的 EFI 系统分区（fs 提示 vfat）。给出分区方案时把容量和理由一起说明。
 - 备份流程：partition 建分区 → format 建文件系统 → 用 run_command 的 mount 把目标分区挂载到某个目录（需确认）→ backup 把数据分区内容同步过去 → 用 umount 卸载。backup 只允许写向非敏感盘。
 - 磁盘标识：不要把手写的 /dev/vdX、/dev/sdX 设备名写进自动安装模板——换机器/换接口/重启后会变。选盘用 list_disks 报出的 serial（磁盘序列号），挂载用卷标（label）；整盘设备名只在调用 partition/format/gen_autoinstall 时才用。

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -12,16 +13,159 @@ import (
 // 参数白名单：任何写操作的 argv 都由本包自行拼装，用户字符串只允许落在这些字符集内，
 // 且一律用 exec.Command(argv) 直接执行、不经 shell。这就是“危险参数拦截”的落点：
 // 调用方无法传入 -F/--delete 之外的自定义开关，也无法注入路径或元字符。
+// fsSpec 声明一种文件系统：怎么建、parted 里叫什么、卷标上限、GPT 上要不要标成
+// Microsoft Basic Data、以及用哪个工具检查（fsck 只写进提示，不作为工具开放）。
+// 新增一种格式只加一行；挂载选项的另一份实现在 init/mount_payload.sh 的 fs_opts()。
+type fsSpec struct {
+	mkfsBin     string                           // 建文件系统的可执行名（裸名，靠 exec 时的 PATH 解析）
+	mkfs        func(dev, label string) []string // argv 拼装（各类型差异是位置+条件，不是模板）
+	partedToken string                           // parted 的 fs-type 记号；"" = 无此记号，mkpart 省略
+	maxLabel    int                              // 卷标长度上限（全局 labelRe 已限 16，这里取更小的）
+	msftData    bool                             // GPT 数据分区补 set N msftdata on（跨平台可见）
+	fsckBin     string                           // 修复/检查工具名（仅供提示文案）
+}
+
+var fsSpecs = map[string]fsSpec{
+	// -O ^orphan_file,^metadata_csum_seed：随包的 e2fsprogs 1.47 内置默认会开这两个特性，而目标发行版的
+	// e2fsck/GRUB（如 Ubuntu 22.04 的 1.46.5 / GRUB 2.06）读不了带它们的 ext4 —— 表现为安装器
+	// grub-install 报 "unknown filesystem"（ESP 留空）、装完开机 systemd-fsck 失败进紧急模式。
+	"ext2": {mkfsBin: "mke2fs", partedToken: "ext2", maxLabel: 16, fsckBin: "e2fsck",
+		mkfs: func(dev, label string) []string { return mke2fsArgv("ext2", dev, label) }},
+	"ext3": {mkfsBin: "mke2fs", partedToken: "ext3", maxLabel: 16, fsckBin: "e2fsck",
+		mkfs: func(dev, label string) []string { return mke2fsArgv("ext3", dev, label) }},
+	"ext4": {mkfsBin: "mke2fs", partedToken: "ext4", maxLabel: 16, fsckBin: "e2fsck",
+		mkfs: func(dev, label string) []string { return mke2fsArgv("ext4", dev, label) }},
+	// ESP 必须是 FAT：vfat 走内置 busybox 的 mkfs.vfat（-F 32；FAT 卷标上限 11 字符）
+	"vfat": {mkfsBin: "mkfs.vfat", partedToken: "fat32", maxLabel: 11, fsckBin: "",
+		mkfs: func(dev, label string) []string {
+			cmd := []string{"mkfs.vfat", "-F", "32"}
+			if label != "" {
+				cmd = append(cmd, "-n", label)
+			}
+			return append(cmd, dev)
+		}},
+	// exFAT：Windows / macOS / Android 13+ 都能读写的通用数据盘格式。
+	// parted 没有 exfat 记号（3.6 的记号全集里查过），所以 mkpart 省略 fs-type，
+	// 改用 msftdata 标志让 GPT 类型成为 Microsoft Basic Data。
+	"exfat": {mkfsBin: "mkfs.exfat", partedToken: "", maxLabel: 15, msftData: true, fsckBin: "fsck.exfat",
+		mkfs: func(dev, label string) []string {
+			cmd := []string{"mkfs.exfat"}
+			if label != "" {
+				cmd = append(cmd, "-L", label)
+			}
+			return append(cmd, dev)
+		}},
+	// NTFS：挂载读写走内核 ntfs3，建文件系统用随包的 mkntfs（不引入 FUSE）。
+	// 同理 mkpart 用 parted 的 ntfs 记号，并补 msftdata 让 Windows 认作基本数据盘。
+	// -f 必给：不带它 mkntfs 会逐簇把整个卷写零（实测 1GiB 镜像 4.29s，1TB 约 70 分钟），
+	// 而本工具链其它 mkfs 都只写结构、不清零。
+	"ntfs": {mkfsBin: "mkntfs", partedToken: "ntfs", maxLabel: 16, msftData: true, fsckBin: "ntfsfix",
+		mkfs: func(dev, label string) []string {
+			cmd := []string{"mkntfs", "-f", "-F"}
+			if label != "" {
+				cmd = append(cmd, "-L", label)
+			}
+			return append(cmd, dev)
+		}},
+	// f2fs：Android 内部存储与 OTG 盘。parted 有 f2fs 记号，类型保持 Linux 侧。
+	"f2fs": {mkfsBin: "mkfs.f2fs", partedToken: "f2fs", maxLabel: 16, fsckBin: "fsck.f2fs",
+		mkfs: func(dev, label string) []string {
+			cmd := []string{"mkfs.f2fs"}
+			if label != "" {
+				cmd = append(cmd, "-l", label)
+			}
+			return append(cmd, dev)
+		}},
+	// XFS：Linux 侧常见数据盘，内核模块随包（能读写挂载）、parted 有 xfs 记号，
+	// 但 xfsprogs 没进静态工具链 → 只声明类型，不提供 mkfs（与 hfsplus 同档）。
+	"xfs": {partedToken: "xfs", maxLabel: 16},
+	// HFS+：macOS 旧格式盘，只能读写挂载与分区，Linux 端没有可用的 mkfs（mkhfsplus 属 Darwin）。
+	"hfsplus": {partedToken: "hfs+", maxLabel: 16},
+}
+
+func mke2fsArgv(fs, dev, label string) []string {
+	cmd := []string{"mke2fs", "-t", fs, "-F", "-O", "^orphan_file,^metadata_csum_seed"}
+	if label != "" {
+		cmd = append(cmd, "-L", label)
+	}
+	return append(cmd, dev)
+}
+
+var allowedTable = map[string]bool{"gpt": true, "msdos": true}
+
 var (
-	allowedFS    = map[string]bool{"ext2": true, "ext3": true, "ext4": true, "vfat": true}
-	allowedTable = map[string]bool{"gpt": true, "msdos": true}
-	// parted 的 fs-type 记号与 mkfs 名字不同：vfat 在 parted 里写作 fat32。
-	partedFS   = map[string]string{"ext2": "ext2", "ext3": "ext3", "ext4": "ext4", "vfat": "fat32"}
 	devRe      = regexp.MustCompile(`^/[A-Za-z0-9._/+-]+$`)
 	labelRe    = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,16}$`)
 	partNameRe = regexp.MustCompile(`^[A-Za-z0-9_. -]{1,36}$`)
 	sizeRe     = regexp.MustCompile(`^([0-9]+)(?:\.[0-9]+)?(KiB|MiB|GiB|TiB|KB|MB|GB|TB|K|M|G|T|B)?$`)
 )
+
+// defaultExecPath 是 initramfs 里随包工具的固定目录集合。
+// 执行 mkfs/parted 时设的 PATH 与能力探测用的是同一份，避免出现"探测说在、执行时找不到"的偏差。
+// VTOY_AI_TOOL_PATH 只用于单测与离线调试（把查找目录换成 fixture，验证"工具缺席 → 不声明能力"）。
+const defaultExecPath = "/bin:/sbin:/usr/bin:/usr/sbin"
+const ToolPathEnv = "VTOY_AI_TOOL_PATH"
+
+func execPathValue() string {
+	if v := os.Getenv(ToolPathEnv); v != "" {
+		return v
+	}
+	return defaultExecPath
+}
+
+func toolSearchDirs() []string { return filepath.SplitList(execPathValue()) }
+
+// toolAvailable 判断随包工具在不在（非静态二进制在 initramfs 里根本跑不起来，这里只看名字）。
+// 不做缓存：调用点只有 schema 构建与每次 format，而测试会整体换掉查找目录来验证降级。
+func toolAvailable(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, d := range toolSearchDirs() {
+		if st, err := os.Stat(filepath.Join(d, name)); err == nil && !st.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+// fsNames 返回表里全部类型名（按字典序，供文案与校验共用）。
+func fsNames() []string {
+	out := make([]string, 0, len(fsSpecs))
+	for k := range fsSpecs {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// SupportedFS 是 partition 的 fs 提示可接受的类型（含只能挂载读写的 hfsplus）。
+func SupportedFS() []string { return fsNames() }
+
+// FormatFSAdvertised 是「能格式化」的类型：表项声明了 mkfs，且随包工具确实在盘上。
+// 给模型看的清单只从这里生成，避免出现第二份硬编码列表或“先承诺再失败”。
+func FormatFSAdvertised() []string {
+	out := []string{}
+	for _, name := range fsNames() {
+		sp := fsSpecs[name]
+		if sp.mkfsBin != "" && toolAvailable(sp.mkfsBin) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// NonCreatableFS 是「能识别、能读写挂载，但 Linux 端没有创建工具」的类型（HFS+）。
+// 单列出来是为了让模型在对话里明确拒绝"把盘格成 HFS+"，而不是含糊失败。
+func NonCreatableFS() []string {
+	out := []string{}
+	for _, name := range fsNames() {
+		if fsSpecs[name].mkfs == nil {
+			out = append(out, name)
+		}
+	}
+	return out
+}
 
 const mib = int64(1024 * 1024)
 
@@ -63,22 +207,26 @@ func validateTable(t string) error {
 	return nil
 }
 
+// validateFS 校验对外的文件系统名。清单就是 fsSpecs 的 keys，
+// 新增格式只改表；这里的报错文案也随之改变。
 func validateFS(fs string) error {
 	if fs == "" {
 		return nil
 	}
-	if !allowedFS[fs] {
-		return fmt.Errorf("不支持的文件系统 %q（可用: ext2/ext3/ext4/vfat，vfat 用于 EFI 系统分区）", fs)
+	if _, ok := fsSpecs[fs]; !ok {
+		return fmt.Errorf("不支持的文件系统 %q（可用: %s；vfat 用于 EFI 系统分区）",
+			fs, strings.Join(fsNames(), "/"))
 	}
 	return nil
 }
 
-// partedFSToken 把对外的文件系统名映射为 parted 的 fs-type 记号（vfat → fat32，其余同名）。
+// partedFSToken 把对外的文件系统名映射为 parted 的 fs-type 记号。
+// 返回 "" 表示 parted 3.6 没有这个记号（如 exfat），mkpart 须省略 fs-type。
 func partedFSToken(fs string) string {
-	if t, ok := partedFS[fs]; ok {
-		return t
+	if sp, ok := fsSpecs[fs]; ok {
+		return sp.partedToken
 	}
-	return fs
+	return ""
 }
 
 func validateLabel(label string) error {
@@ -306,16 +454,23 @@ func (p *Probe) buildPartition(dev, table string, specs []PartSpec, payloadRoot 
 		if name == "" {
 			name = "primary"
 		}
-		// gpt: mkpart <name> <fs> start end ; msdos: mkpart primary <fs> start end
-		// fs 为空时省略该占位（parted 的 fs-type 可省略）；对外的 vfat 映射为 parted 的 fat32
+		idx := strconv.Itoa(i + 1)
+		// gpt: mkpart <name> [<fs>] start end ; msdos: mkpart primary [<fs>] start end
+		// parted 的 fs-type 是可省略项；无对应记号时（exfat）就省略，靠下面的类型标志表达归属。
 		args := []string{"parted", "-s", cdev, "mkpart", name}
-		if r.spec.FS != "" {
-			args = append(args, partedFSToken(r.spec.FS))
+		if token := partedFSToken(r.spec.FS); token != "" {
+			args = append(args, token)
 		}
 		args = append(args, r.start, r.end)
 		cmds = append(cmds, args)
 		if table == "gpt" && r.spec.Name != "" {
-			cmds = append(cmds, []string{"parted", "-s", cdev, "name", strconv.Itoa(i + 1), r.spec.Name})
+			cmds = append(cmds, []string{"parted", "-s", cdev, "name", idx, r.spec.Name})
+		}
+		// GPT 分区类型 GUID：parted 默认写 Linux FS data。跨平台数据盘（exFAT/NTFS）必须
+		// 标成 Microsoft Basic Data，否则 Windows 不认、macOS/Android 挂载体验差。
+		// Linux 侧格式（ext*/xfs/f2fs/hfs+）不加 —— 加了会被 Windows 当作可格式化的基本数据盘。
+		if table == "gpt" && fsSpecs[r.spec.FS].msftData {
+			cmds = append(cmds, []string{"parted", "-s", cdev, "set", idx, "msftdata", "on"})
 		}
 	}
 	return cmds, nil
@@ -393,25 +548,20 @@ func (p *Probe) buildFormat(dev, fstype, label, payloadRoot string) ([]string, e
 	if err := p.requireWritable(dev, payloadRoot); err != nil {
 		return nil, err
 	}
-	// ESP 必须是 FAT：vfat 走内置 busybox 的 mkfs.vfat（-F 32；FAT 卷标上限 11 字符）。
-	if fstype == "vfat" {
-		if len(label) > 11 {
-			return nil, fmt.Errorf("vfat 卷标最多 11 个字符（当前 %d 个）: %q", len(label), label)
-		}
-		cmd := []string{"mkfs.vfat", "-F", "32"}
-		if label != "" {
-			cmd = append(cmd, "-n", label)
-		}
-		return append(cmd, p.canonDev(dev)), nil
+	// 单次派发：argv 拼装、卷标上限、能否创建，全部由 fsSpecs 表决定。
+	sp := fsSpecs[fstype]
+	if sp.mkfs == nil {
+		return nil, fmt.Errorf("%s 在 Linux 端没有可用的创建工具（只能挂载读写）；跨平台数据盘请用 exfat", fstype)
 	}
-	// -O ^orphan_file,^metadata_csum_seed：随包的 e2fsprogs 1.47 内置默认会开这两个特性，而目标发行版的
-	// e2fsck/GRUB（如 Ubuntu 22.04 的 1.46.5 / GRUB 2.06）读不了带它们的 ext4 —— 表现为安装器
-	// grub-install 报 "unknown filesystem"（ESP 留空）、装完开机 systemd-fsck 失败进紧急模式。
-	cmd := []string{"mke2fs", "-t", fstype, "-F", "-O", "^orphan_file,^metadata_csum_seed"}
-	if label != "" {
-		cmd = append(cmd, "-L", label)
+	if !toolAvailable(sp.mkfsBin) {
+		return nil, fmt.Errorf("当前环境缺少 %s，无法格式化为 %s（可格式化: %s）",
+			sp.mkfsBin, fstype, strings.Join(FormatFSAdvertised(), "/"))
 	}
-	return append(cmd, p.canonDev(dev)), nil
+	if len(label) > sp.maxLabel {
+		return nil, fmt.Errorf("%s 卷标最多 %d 个字符（当前 %d 个）: %q", fstype, sp.maxLabel, len(label), label)
+	}
+	cdev := p.canonDev(dev)
+	return sp.mkfs(cdev, label), nil
 }
 
 // FormatPlan 在真正执行前给出将运行的命令。
@@ -423,7 +573,7 @@ func (p *Probe) FormatPlan(dev, fstype, label, payloadRoot string) ([]string, er
 	return []string{strings.Join(cmd, " ")}, nil
 }
 
-// Format 在分区上创建文件系统（ext2/ext3/ext4 用内置 e2fsprogs；vfat 用内置 mkfs.vfat，供 ESP 使用）。
+// Format 在分区上创建文件系统；支持的类型与各自的 argv 由 fsSpecs 表决定（见表即知全貌）。
 func (p *Probe) Format(dev, fstype, label, payloadRoot string) (Result, error) {
 	res := Result{OK: false, Action: "format", Target: dev}
 	cmd, err := p.buildFormat(dev, fstype, label, payloadRoot)
@@ -437,7 +587,12 @@ func (p *Probe) Format(dev, fstype, label, payloadRoot string) (Result, error) {
 	out, err := p.runner()(cmd[0], cmd[1:]...)
 	res.Output = appendLines(res.Output, out)
 	if err != nil {
-		return res, fmt.Errorf("执行 %q 失败: %v\n%s", strings.Join(cmd, " "), err, tail(out))
+		// fsck 工具只在这里出现在提示里：不开放成 agent 工具，避免绕过 format 的逐字确认闸门。
+		hint := ""
+		if fb := fsSpecs[fstype].fsckBin; fb != "" {
+			hint = "（可先用 " + fb + " 检查该分区）"
+		}
+		return res, fmt.Errorf("执行 %q 失败: %v%s\n%s", strings.Join(cmd, " "), err, hint, tail(out))
 	}
 	res.OK = true
 	res.Detail = fmt.Sprintf("已在 %s 创建 %s 文件系统", dev, fstype)

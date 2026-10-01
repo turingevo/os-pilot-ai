@@ -29,6 +29,7 @@ func (f *fakeIO) ScriptMode() bool { return false }
 // 外加一个挂在 /iso 的 vda1 用来验证“受保护设备”判定。
 func testProbe(t *testing.T) (*disk.Probe, *[]string) {
 	t.Helper()
+	withTools(t, bundledTools...)
 	root := t.TempDir()
 	sys := filepath.Join(root, "sys")
 	dev := filepath.Join(root, "dev")
@@ -59,6 +60,25 @@ func testProbe(t *testing.T) (*disk.Probe, *[]string) {
 			return "", nil
 		},
 	}, &calls
+}
+
+func withTools(t *testing.T, names ...string) {
+	t.Helper()
+	dir := t.TempDir()
+	for _, n := range names {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("#!/bin/sh\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv(disk.ToolPathEnv, dir)
+}
+
+// bundledTools 与随包 initramfs 的 /bin 对齐（pack_env.sh 的 TOOLS_LIST + busybox applet）。
+var bundledTools = []string{
+	"mke2fs", "e2fsck", "resize2fs", "tune2fs", "dumpe2fs",
+	"parted", "rsync", "blkid", "mkfs.vfat",
+	"mkfs.exfat", "fsck.exfat", "mkfs.f2fs", "fsck.f2fs",
+	"mkntfs", "ntfsfix",
 }
 
 func writeF(t *testing.T, p, s string) {
@@ -223,13 +243,153 @@ func TestVFATSupportedThroughRegistry(t *testing.T) {
 	}
 }
 
+// 跨平台数据盘（exFAT / NTFS / f2fs）在对话链路里可用：format 走各自 mkfs，
+// partition 的 GPT 类型按 msftdata 规则处理，每步仍需逐字确认盘名。
+func TestCrossPlatformFSThroughRegistry(t *testing.T) {
+	cases := []struct {
+		fs         string
+		label      string
+		wantMkfs   string
+		wantMkpart string
+		wantSet    bool
+	}{
+		{"exfat", "SHARE", "mkfs.exfat -L SHARE ", "mkpart data 1MiB 100%", true},
+		{"ntfs", "WIN", "mkntfs -f -F -L WIN ", "mkpart data ntfs 1MiB 100%", true},
+		{"f2fs", "ANDROID", "mkfs.f2fs -l ANDROID ", "mkpart data f2fs 1MiB 100%", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.fs, func(t *testing.T) {
+			p, calls := testProbe(t)
+			reg := NewDefaultRegistry()
+			io := &fakeIO{typedOK: true}
+			ctx := ctxWith(p, "orchestrate", io)
+
+			res, err := reg.Call(ctx, "format", json.RawMessage(
+				`{"device":"/dev/vdb","fstype":"`+tc.fs+`","label":"`+tc.label+`"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(res, `"ok": true`) {
+				t.Fatalf("%s 格式化应成功: %s", tc.fs, res)
+			}
+			res, err = reg.Call(ctx, "partition", json.RawMessage(
+				`{"disk":"/dev/vdb","partitions":[{"size":"rest","fs":"`+tc.fs+`","name":"data"}]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(res, `"ok": true`) {
+				t.Fatalf("含 %s 提示的分区应成功: %s", tc.fs, res)
+			}
+			joined := strings.Join(*calls, "\n")
+			for _, want := range []string{tc.wantMkfs, tc.wantMkpart} {
+				if !strings.Contains(joined, want) {
+					t.Fatalf("缺少命令 %q:\n%s", want, joined)
+				}
+			}
+			if has := strings.Contains(joined, "set 1 msftdata on"); has != tc.wantSet {
+				t.Fatalf("%s 的 msftdata 期望 %v，实际 %v:\n%s", tc.fs, tc.wantSet, has, joined)
+			}
+			if len(io.words) != 2 || io.words[0] != "vdb" {
+				t.Fatalf("%s 的两次写操作都应逐字确认盘名: %v", tc.fs, io.words)
+			}
+		})
+	}
+}
+
+// 能力声明只来自运行时探测：enum 是给模型的契约，工具缺席就从契约里消失，不会“先承诺再失败”。
+func TestRegistryAdvertisesOnlyInstalledTools(t *testing.T) {
+	p, calls := testProbe(t)
+	enumOf := func(t *testing.T, reg *Registry, tool, arg string) []string {
+		t.Helper()
+		for _, d := range reg.Defs() {
+			if d.Function.Name != tool {
+				continue
+			}
+			props := d.Function.Parameters.(map[string]any)["properties"].(map[string]any)
+			if arg == "fs" { // partition 的 fs 在 partitions.items.properties 里
+				items := props["partitions"].(map[string]any)["items"].(map[string]any)
+				props = items["properties"].(map[string]any)
+			}
+			enum, _ := props[arg].(map[string]any)["enum"].([]string)
+			return enum
+		}
+		t.Fatalf("没有工具 %s", tool)
+		return nil
+	}
+
+	formatFS := enumOf(t, NewDefaultRegistry(), "format", "fstype")
+	for _, want := range []string{"ext4", "vfat", "exfat", "f2fs", "ntfs"} {
+		if !hasStr(formatFS, want) {
+			t.Fatalf("已装的 %s 应出现在 fstype enum 里: %v", want, formatFS)
+		}
+	}
+	// hfsplus/xfs 表里就没有创建工具（Linux 端无 mkfs / xfsprogs 未随包），永远不进 enum
+	if hasStr(formatFS, "hfsplus") || hasStr(formatFS, "xfs") {
+		t.Fatalf("无可用的创建工具，不应进入可格式化 enum: %v", formatFS)
+	}
+	// 挂载与分区能力不依赖 mkfs：hfsplus/xfs 只出现在 partition 的类型提示里
+	partFS := enumOf(t, NewDefaultRegistry(), "partition", "fs")
+	for _, want := range []string{"hfsplus", "xfs", "exfat", "f2fs"} {
+		if !hasStr(partFS, want) {
+			t.Fatalf("%s 应可作为分区类型提示: %v", want, partFS)
+		}
+	}
+
+	// 只装了 e2fsprogs + busybox 的 mkfs.vfat（旧构建产物目录）：跨平台类型从 enum 里消失
+	withTools(t, "mke2fs", "mkfs.vfat")
+	part := NewDefaultRegistry()
+	got := enumOf(t, part, "format", "fstype")
+	for _, want := range []string{"ext4", "vfat"} {
+		if !hasStr(got, want) {
+			t.Fatalf("e2fsprogs/vfat 在装时应可格式化: %v", got)
+		}
+	}
+	for _, no := range []string{"exfat", "f2fs", "ntfs"} {
+		if hasStr(got, no) {
+			t.Fatalf("缺少对应 mkfs 时 %s 不应可格式化: %v", no, got)
+		}
+	}
+	io := &fakeIO{typedOK: true}
+	if _, err := part.Call(ctxWith(p, "orchestrate", io), "format",
+		json.RawMessage(`{"device":"/dev/vdb","fstype":"exfat"}`)); err == nil {
+		t.Fatal("未随包 mkfs.exfat 时格式化应被拒")
+	}
+	if len(*calls) != 0 || len(io.words) != 0 {
+		t.Fatalf("部分工具缺席同样应既不执行也不确认: calls=%v words=%v", *calls, io.words)
+	}
+
+	// 一个 mkfs 都没有：enum 清空，format 在确认环节之前就被拒
+	withTools(t)
+	none := NewDefaultRegistry()
+	if got := enumOf(t, none, "format", "fstype"); len(got) != 0 {
+		t.Fatalf("工具缺席时 fstype enum 应为空: %v", got)
+	}
+	io = &fakeIO{typedOK: true}
+	if _, err := none.Call(ctxWith(p, "orchestrate", io), "format",
+		json.RawMessage(`{"device":"/dev/vdb","fstype":"exfat"}`)); err == nil {
+		t.Fatal("无随包工具时格式化应被拒")
+	}
+	if len(*calls) != 0 || len(io.words) != 0 {
+		t.Fatalf("应既不下发命令也不进入确认: calls=%v words=%v", *calls, io.words)
+	}
+}
+
+func hasStr(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
 // 参数拦截：非法文件系统/设备/大小在确认之前就被拒。
 func TestDiskArgumentInterceptionViaRegistry(t *testing.T) {
 	p, calls := testProbe(t)
 	reg := NewDefaultRegistry()
 	io := &fakeIO{typedOK: true}
 	cases := []struct{ name, args string }{
-		{"format", `{"device":"/dev/vdb","fstype":"exfat"}`},
+		{"format", `{"device":"/dev/vdb","fstype":"apfs"}`},
 		{"format", `{"device":"/dev/../etc/passwd","fstype":"ext4"}`},
 		{"format", `{"device":"vdb","fstype":"ext4"}`},
 		{"partition", `{"disk":"/dev/vdb","partitions":[{"size":"0"}]}`},

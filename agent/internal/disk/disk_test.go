@@ -13,6 +13,10 @@ import (
 // 布局：vda(8GiB)+vda1(ext4，挂在 /iso) / vdb(64MiB，空盘) / vdc(2GiB)+vdc1(ext4)
 func newFixture(t *testing.T, mounts string) (*Probe, *[]string, map[string]string) {
 	t.Helper()
+	// 用例没自行指定工具目录时，默认铺满随包工具（否则结论会随宿主环境漂移）
+	if os.Getenv(ToolPathEnv) == "" {
+		withTools(t, allBundledTools...)
+	}
 	root := t.TempDir()
 	sys := filepath.Join(root, "sys-block")
 	devices := filepath.Join(root, "devices")
@@ -271,7 +275,7 @@ func TestPartitionPlanCommands(t *testing.T) {
 func TestArgumentInterception(t *testing.T) {
 	p, _, _ := newFixture(t, mountsPayload)
 
-	for _, fs := range []string{"exfat", "ntfs", "xfs", "fat32", "ext4; rm -rf /"} {
+	for _, fs := range []string{"fat32", "apfs", "refs", "btrfs", "ext4; rm -rf /"} {
 		if _, err := p.FormatPlan("/dev/vdc1", fs, "", "/iso"); err == nil {
 			t.Fatalf("不支持的文件系统应被拒: %q", fs)
 		}

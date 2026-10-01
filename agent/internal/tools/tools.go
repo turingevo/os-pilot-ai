@@ -141,6 +141,12 @@ func NewDefaultRegistry() *Registry {
 		}, "cmd"),
 	}}, handleRunCommand)
 
+	// 能力文案只从 disk 的 fsSpecs 表 + 随包工具探测生成：这里不出现第二份硬编码列表，
+	// 随包工具缺席时（例如没编 mkntfs）模型看到的清单会自动少一项，不会“先承诺再失败”。
+	formatFSTypes := disk.FormatFSAdvertised()
+	partitionFSTypes := disk.SupportedFS()
+	noCreateFS := strings.Join(disk.NonCreatableFS(), "/")
+
 	r.register(llm.ToolDef{Type: "function", Function: llm.FunctionDef{
 		Name:        "ask_user",
 		Description: "向用户提问并等待回答。用于询问安装目标系统、分区方案、用户名、时区等关键信息。可提供选项列表。",
@@ -180,7 +186,7 @@ func NewDefaultRegistry() *Registry {
 					"type": "object",
 					"properties": map[string]any{
 						"size": map[string]any{"type": "string", "description": "大小，如 100MiB / 8G / rest / 100%"},
-						"fs":   map[string]any{"type": "string", "description": "分区类型提示 ext4/vfat（仅提示，不影响后续格式化；EFI 系统分区用 vfat）"},
+						"fs":   map[string]any{"type": "string", "enum": partitionFSTypes, "description": "分区类型提示：只决定 parted 的 fs-type 记号与 GPT 分区类型，不影响后续格式化。EFI 系统分区用 vfat；跨平台数据盘用 exfat（parted 无该记号，会自动标成 Microsoft Basic Data）"},
 						"name": map[string]any{"type": "string", "description": "GPT 分区名（可选）"},
 					},
 					"required": []string{"size"},
@@ -191,11 +197,11 @@ func NewDefaultRegistry() *Registry {
 
 	r.register(llm.ToolDef{Type: "function", Function: llm.FunctionDef{
 		Name:        "format",
-		Description: "在分区（或裸盘）上创建文件系统，会清空该设备原有数据。支持 ext4/ext3/ext2（内置 e2fsprogs）与 vfat（内置 mkfs.vfat，用于 EFI 系统分区）。device 传具体分区（如 /dev/sdb1）；已挂载的分区需先卸载。执行前展示将运行的 mke2fs/mkfs.vfat 命令并要求用户逐字输入设备名确认。",
+		Description: fmt.Sprintf("在分区（或裸盘）上创建文件系统，会清空该设备原有数据。可格式化的类型见 fstype 的 enum（由随包工具探测得出，缺席即不支持新建）；%s 只能读写挂载与分区，Linux 端没有创建工具，遇到这类诉求要改口建议 exfat。用途选择：Linux 装机用 ext4，EFI 系统分区用 vfat，Windows/macOS/Android 之间互访的数据盘用 exfat。device 传具体分区（如 /dev/sdb1）；已挂载的分区需先卸载。执行前展示将运行的 mkfs 命令并要求用户逐字输入设备名确认。", noCreateFS),
 		Parameters: objSchema(map[string]any{
 			"device": map[string]any{"type": "string", "description": "要格式化的设备路径，如 /dev/sdb1"},
-			"fstype": map[string]any{"type": "string", "description": "文件系统类型 ext4/ext3/ext2/vfat（EFI 系统分区用 vfat），默认 ext4"},
-			"label":  map[string]any{"type": "string", "description": "卷标（可选，≤16 字符）"},
+			"fstype": map[string]any{"type": "string", "enum": formatFSTypes, "description": "文件系统类型，默认 ext4；只能取 enum 里的值"},
+			"label":  map[string]any{"type": "string", "description": "卷标（可选；长度上限按类型：vfat 11 / exfat 15 / 其余 16 字符）"},
 		}, "device"),
 	}}, handleFormat)
 

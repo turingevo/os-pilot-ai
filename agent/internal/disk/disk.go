@@ -83,7 +83,7 @@ func DefaultProbe() *Probe {
 
 func execRun(name string, args ...string) (string, error) {
 	c := exec.Command(name, args...)
-	c.Env = []string{"PATH=/bin:/sbin:/usr/bin:/usr/sbin"}
+	c.Env = []string{"PATH=" + execPathValue()}
 	out, err := c.CombinedOutput()
 	return string(out), err
 }
