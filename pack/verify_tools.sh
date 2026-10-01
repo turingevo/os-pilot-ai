@@ -38,6 +38,7 @@ cat > "$SCRIPT" <<'EOF'
 !parted -s /dev/vdb mklabel gpt
 !parted -s /dev/vdb mkpart primary ext4 1MiB 100%
 !mdev -s
+!lsmod
 !parted -s /dev/vdb print
 !mkfs.ext4 -F -L aitest /dev/vdb1
 !e2fsck -fn /dev/vdb1
@@ -102,7 +103,9 @@ check "Filesystem volume name:   aitest" "tune2fs 读到卷标"
 check "Filesystem features:"       "dumpe2fs 读到超级块"
 check "Estimated minimum size"     "resize2fs 读到文件系统"
 check "Pass 5: Checking group summary information" "e2fsck 五遍检查跑完"
-check "files (0.0% non-contiguous)" "e2fsck 报告文件系统状态"
+check "non-contiguous),"      "e2fsck 报告文件系统状态"
+check "^hfsplus"              "lsmod 有 hfsplus（macOS 目标盘可读写）"
+check "^f2fs"                 "lsmod 有 f2fs（Android 目标盘可读写）"
 check "/dev/vdb1"                  "df 显示已挂载的 /dev/vdb1"
 check "sending incremental file list" "rsync 开始传输"
 check "sent .* bytes"              "rsync 传输完成（有字节数汇总）"

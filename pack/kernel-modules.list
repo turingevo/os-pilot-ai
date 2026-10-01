@@ -24,9 +24,12 @@ sdhci-pci
 mmc_block
 
 # ---------- 文件系统（Ventoy 数据分区与常见安装目标）----------
+# hfsplus: macOS 目标盘；f2fs: Android 目标盘（其 lz4/lz4hc 依赖由 fetch_kernel.sh 的闭包带入）
 exfat
 ntfs3
 xfs
+hfsplus
+f2fs
 udf
 isofs
 msdos
