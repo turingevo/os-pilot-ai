@@ -294,6 +294,7 @@ type streamState struct {
 	sawReasoning bool
 	sawContent   bool
 	inFence      bool
+	phaseSeen    bool // 首 token 已到并已上报"生成中"
 	lineBuf      strings.Builder
 }
 
@@ -473,6 +474,9 @@ type Session struct {
 	cwd     string // 命令模式的工作目录（cd 改它；run_command 与路径补全都用它）
 
 	probeInHistory string // 已写入模型的 system_probe 原文，用于识别重复探测
+
+	phase     string    // 当前阶段文本（就绪/请求模型/生成中/调用工具/回答完毕），显示在状态栏或单行提示
+	turnStart time.Time // 本轮开始时刻，用于整轮耗时
 }
 
 func New(cfg *config.Config, client *llm.Client, reg *tools.Registry, script bool, noReboot bool) (*Session, error) {
@@ -598,11 +602,49 @@ func (s *Session) promptModeName() string {
 	return "ai"
 }
 
+// setPhase 上报会话阶段（就绪 / 请求模型 / 生成中 / 调用工具 / 回答完毕）。
+// 两种 UI 各用各的通道：自绘屏写底部状态栏（本地模型首字可能要十几秒，用户盯着静止画面
+// 无法区分"在算"和"卡死"）；文本/串口控制台没有状态栏，只能打一行 dim 提示——它的 CSI
+// 解析只支持 m/K/J，做不到原地刷一行。脚本模式是无人值守回归，输出要进日志比对，不打扰。
+func (s *Session) setPhase(text string) {
+	s.phase = text
+	if s.io.scr != nil {
+		s.updateStatus()
+		return
+	}
+	if s.io.script {
+		return
+	}
+	s.io.Printf("%s\n", s.io.paint(ansiDim, "  ● "+text))
+}
+
+// setPhaseOnScreen 只更新自绘屏状态栏：这类阶段在文本控制台上已有等价呈现
+// （回答正逐字打出、工具调用本身有一行提示），再插一行只会打断阅读。
+func (s *Session) setPhaseOnScreen(text string) {
+	if s.io.scr != nil {
+		s.setPhase(text)
+	}
+}
+
+// markGenerating 在每轮流式响应的首个 token 上报一次"生成中"。
+func (s *Session) markGenerating(st *streamState) {
+	if st.phaseSeen {
+		return
+	}
+	st.phaseSeen = true
+	s.setPhaseOnScreen("生成中…")
+}
+
 // updateStatus 刷新自绘屏底部状态栏（文本路径没有状态栏，直接忽略）。
 func (s *Session) updateStatus() {
 	if s.io.scr == nil {
 		return
 	}
+	s.io.scr.SetStatus(s.statusLine())
+}
+
+// statusLine 拼装状态栏文本：阶段（就绪/请求模型/生成中/回答完毕·耗时）│ 模型或命令模式目录 │ 模式与按键提示。
+func (s *Session) statusLine() string {
 	left := "[AI] " + s.Cfg.Model
 	if s.cmdMode {
 		left = "[命令] " + s.cwd
@@ -611,8 +653,12 @@ func (s *Session) updateStatus() {
 	if screen.IMEAvailable() {
 		ime = " │ Ctrl+Space 中/英"
 	}
-	s.io.scr.SetStatus(fmt.Sprintf(
-		" %s · 安全模式 %s │ Tab 补全 │ Ctrl+T 切换模式 │ ↑↓ 历史%s ", left, s.Ctx.Mode, ime))
+	phase := ""
+	if s.phase != "" {
+		phase = s.phase + " │ "
+	}
+	return fmt.Sprintf(
+		" %s%s · 安全模式 %s │ Tab 补全 │ Ctrl+T 切换模式 │ ↑↓ 历史%s ", phase, left, s.Ctx.Mode, ime)
 }
 
 func (s *Session) autoProbe() error {
@@ -658,6 +704,9 @@ func (s *Session) Run() (err error) {
 	s.printBanner()
 	if err := s.autoProbe(); err != nil {
 		s.io.Printf("（自动探测失败: %v）\n", err)
+		s.setPhase("就绪（自动探测失败）")
+	} else {
+		s.setPhase("就绪")
 	}
 	for {
 		s.io.SetHistoryKind(s.promptModeName())
@@ -756,16 +805,23 @@ func (s *Session) Turn(input string) error {
 	s.Log.Msg("user", input)
 	s.io.AddHistory("ai", input)
 	s.history = append(s.history, llm.Message{Role: "user", Content: input})
+	s.turnStart = time.Now()
 
 	for i := 0; i < maxToolItersPerTurn; i++ {
 		s.trimHistory()
+		if i == 0 {
+			s.setPhase("请求模型…")
+		} else {
+			s.setPhase("继续推理…")
+		}
 		st := s.io.beginStream()
 		resp, finishReason, err := s.Client.Chat(s.history, s.Reg.Defs(), &llm.StreamHandler{
-			OnReasoning: func(d string) { s.io.streamReasoning(st, d) },
-			OnContent:   func(d string) { s.io.streamContent(st, d) },
+			OnReasoning: func(d string) { s.markGenerating(st); s.io.streamReasoning(st, d) },
+			OnContent:   func(d string) { s.markGenerating(st); s.io.streamContent(st, d) },
 		})
 		s.io.endStream(st)
 		if err != nil {
+			s.setPhase(fmt.Sprintf("出错 · %s", s.turnElapsed()))
 			return err
 		}
 		if resp.Role == "" {
@@ -786,6 +842,7 @@ func (s *Session) Turn(input string) error {
 			}
 			s.Log.Msg("assistant", text)
 			s.history = append(s.history, llm.Message{Role: "assistant", Content: text})
+			s.setPhase(fmt.Sprintf("回答完毕 · %s", s.turnElapsed()))
 			return nil
 		}
 		for j := range resp.ToolCalls {
@@ -805,6 +862,7 @@ func (s *Session) Turn(input string) error {
 				argText = "{}"
 			}
 			s.io.Printf("%s\n", s.io.toolCallLine(name, argText))
+			s.setPhaseOnScreen(fmt.Sprintf("调用 %s…", name))
 			s.Log.ToolCall(name, argText)
 			start := time.Now()
 			result, terr := s.Reg.Call(s.Ctx, name, json.RawMessage(argText))
@@ -819,7 +877,16 @@ func (s *Session) Turn(input string) error {
 			s.history = append(s.history, llm.Message{Role: "tool", ToolCallID: tc.ID, Name: name, Content: s.dedupProbe(name, result)})
 		}
 	}
+	s.setPhase(fmt.Sprintf("出错 · %s", s.turnElapsed()))
 	return fmt.Errorf("单轮工具调用达到上限 %d 次，已停止本轮", maxToolItersPerTurn)
+}
+
+// turnElapsed 返回本轮已用时（秒，保留一位小数），用于状态栏的"回答完毕/出错"耗时。
+func (s *Session) turnElapsed() string {
+	if s.turnStart.IsZero() {
+		return "?"
+	}
+	return fmt.Sprintf("%.1fs", time.Since(s.turnStart).Seconds())
 }
 
 func (s *Session) trimHistory() {
