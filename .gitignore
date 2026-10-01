@@ -1,3 +1,5 @@
 # 构建产物（构建源在仓库外的构建目录，路径解析见 pack/defaults.sh）
 agent/os-pilot-ai
 __pycache__/
+# 本机私有构建路径（该文件缺失时 pack/defaults.sh 会提示；示例见其顶部注释）
+pack/defaults.user.sh

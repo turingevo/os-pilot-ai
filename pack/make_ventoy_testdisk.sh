@@ -45,7 +45,7 @@ if [ -z "$REL" ] || [ ! -f "$REL/boot/core.img.xz" ] || [ ! -f "$REL/ventoy/vent
     echo "错误: 未找到官方 Ventoy 发布包（需要 boot/boot.img、boot/core.img.xz、ventoy/ventoy.disk.img.xz）" >&2
     echo "  从官网下载发布包并解压，然后二选一指定其目录：" >&2
     echo "    VTOY_AI_VENTOY_RELEASE=<目录> sh $0" >&2
-    echo "    或写进机器本地 ${VTOY_AI_DEFAULTS_FILE:-~/.config/ventoy-ai/defaults.sh}" >&2
+    echo "    或写进 pack/defaults.user.sh（本机私有，不进仓库）" >&2
     exit 1
 fi
 

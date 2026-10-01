@@ -134,8 +134,11 @@ func realFont(t *testing.T) *Font {
 		if err != nil {
 			t.Skipf("无法定位 pack/defaults.sh: %v", err)
 		}
-		out, err := exec.Command("sh", "-c",
-			`. "$1" 2>/dev/null; printf %s "$VTOY_AI_BUILD_DIR"`, "sh", script).Output()
+		// sh -c 里 $0 不带路径，defaults.sh 靠 VTOY_AI_PACK_DIR 定位同目录的用户配置
+		cmd := exec.Command("sh", "-c",
+			`. "$1" 2>/dev/null; printf %s "$VTOY_AI_BUILD_DIR"`, "sh", script)
+		cmd.Env = append(os.Environ(), "VTOY_AI_PACK_DIR="+filepath.Dir(script))
+		out, err := cmd.Output()
 		if err != nil || len(out) == 0 {
 			t.Skip("无法解析 VTOY_AI_BUILD_DIR（pack/defaults.sh）")
 		}

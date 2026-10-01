@@ -50,7 +50,7 @@ llama-server automatically.
 
 | Script | Description |
 |--------|-------------|
-| `defaults.sh` | Build-path resolution layer (sourced by the other scripts): positional args > `VTOY_AI_*` env vars > `~/.config/ventoy-ai/defaults.sh` > built-in fallback outside the repo; also provides the QEMU resource defaults (KVM/memory/CPUs) |
+| `defaults.sh` | Build-path resolution layer (sourced by the other scripts): positional args > `VTOY_AI_*` env vars > `pack/defaults.user.sh` (machine-private, gitignored) > built-in fallback outside the repo; sourcing prints a hint when that file is missing; also provides the QEMU resource defaults (KVM/memory/CPUs) |
 | `build_busybox.sh` | Build a static x86_64 busybox (downloads the official source tarball + SHA256 verification by default) |
 | `fetch_kernel.sh` | Download the Ubuntu 26.04 distro kernel (linux-image + linux-modules, pinned SHA256) and trim modules per `kernel-modules.list` (`.ko.zst` → `.ko`) |
 | `kernel-modules.list` | Module list shipped in the initramfs (storage/filesystems/NICs/input/display; dependency closure of 63 modules) |
@@ -69,7 +69,7 @@ llama-server automatically.
 | `run_qemu_target.sh` | Boot an **installed** target-disk image in QEMU (rootless) to verify it boots |
 | `run_qemu_ime.sh` | Local-screen IME end-to-end regression (sendkey-driven; verifies the Chinese text sent to the model) |
 | `run_qemu_ui.py` | Local-screen interaction end-to-end regression (QMP send-key + bitmap-font OCR, 34 assertions) |
-| `verify_tools.sh` | In-guest test of the bundled toolchain (pure `!command`, 16 assertions, no LLM needed) |
+| `verify_tools.sh` | In-guest test of the bundled toolchain (pure `!command`, 35 assertions, no LLM needed) |
 | `verify_disk_tools.sh` | In-guest test of the guarded disk tools (mock LLM scenario, 30 assertions) |
 | `verify_install_loop.sh` | "AI builds the disk → target distro reads it → real boot" loop (before/after contrast) |
 | `verify_target_image.sh` | Read-only static criteria for an installed target disk ("can it boot") |
@@ -77,16 +77,19 @@ llama-server automatically.
 ## Building (rootless, entirely outside the repo)
 
 The build directory is resolved by `pack/defaults.sh` with this precedence: **positional args >
-`VTOY_AI_BUILD_DIR` env var > machine-local `~/.config/ventoy-ai/defaults.sh` > built-in fallback
-`${XDG_CACHE_HOME:-$HOME/.cache}/ventoy-ai`**. Keep machine-private paths in the local file, never
-commit them:
+`VTOY_AI_BUILD_DIR` env var > `pack/defaults.user.sh` > built-in fallback
+`${XDG_CACHE_HOME:-$HOME/.cache}/ventoy-ai`**. Machine-private paths go in `defaults.user.sh`,
+a gitignored sibling of `defaults.sh` — never commit it:
 
 ```sh
-# ~/.config/ventoy-ai/defaults.sh
+# pack/defaults.user.sh
 export VTOY_AI_BUILD_DIR=/path/to/ventoy-ai-build
 export VTOY_AI_BUSYBOX_SRC=/path/to/busybox-1.36.1    # optional; downloads the official tarball if unset
 export VTOY_AI_VENTOY_RELEASE=/path/to/ventoy-1.1.05  # only needed by make_ventoy_testdisk.sh
 ```
+
+Without that file the build still works (built-in fallback); `source` just prints one hint line
+naming the build directory actually in effect.
 
 ```sh
 AI=$(pwd)                        # repo root; examples assume you are in the repo root

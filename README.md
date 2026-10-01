@@ -43,7 +43,7 @@ AI 装机的 AI 运行环境与 agent：initramfs + 静态 Go agent + 内置 lla
 
 | 脚本 | 说明 |
 |------|------|
-| `defaults.sh` | 构建路径解析层（其余脚本 source）：位置参数 > `VTOY_AI_*` 环境变量 > `~/.config/ventoy-ai/defaults.sh` > 仓库外内置默认；并给出 QEMU 资源默认值（KVM/内存/CPU） |
+| `defaults.sh` | 构建路径解析层（其余脚本 source）：位置参数 > `VTOY_AI_*` 环境变量 > `pack/defaults.user.sh`（本机私有，gitignore）> 仓库外内置默认；缺该文件时 source 打一行提示；并给出 QEMU 资源默认值（KVM/内存/CPU） |
 | `build_busybox.sh` | 编译 x86_64 静态 busybox（默认下载官方源码包 + SHA256 校验） |
 | `fetch_kernel.sh` | 下载 Ubuntu 26.04 发行版内核（linux-image + linux-modules，SHA256 固定），按 `kernel-modules.list` 裁剪模块（`.ko.zst` → `.ko`） |
 | `kernel-modules.list` | 随 initramfs 携带的模块清单（存储/文件系统/网卡/输入/显示，依赖闭包 63 个） |
@@ -62,7 +62,7 @@ AI 装机的 AI 运行环境与 agent：initramfs + 静态 Go agent + 内置 lla
 | `run_qemu_target.sh` | QEMU 启动一块**已安装**的目标盘镜像（免 root），验证装完能否启动 |
 | `run_qemu_ime.sh` | 本地屏输入法端到端回归（sendkey 驱动 + 校验发给模型的中文） |
 | `run_qemu_ui.py` | 本地屏交互端到端回归（QMP send-key + 点阵字体 OCR，34 项断言） |
-| `verify_tools.sh` | guest 内实测内置工具链（纯 `!命令`，16 项断言，不需要 LLM） |
+| `verify_tools.sh` | guest 内实测内置工具链（纯 `!命令`，35 项断言，不需要 LLM） |
 | `verify_disk_tools.sh` | guest 内实测受守卫磁盘工具（mock LLM 剧本，30 项断言） |
 | `verify_install_loop.sh` | 「AI 建房 → 目标发行版读盘 → 真实引导」闭环（修前/修后对照） |
 | `verify_target_image.sh` | 已安装目标盘的「能启动」静态判据（只读取证） |
@@ -70,15 +70,17 @@ AI 装机的 AI 运行环境与 agent：initramfs + 静态 Go agent + 内置 lla
 ## 构建（rootless，全部在仓库外构建）
 
 构建目录由 `pack/defaults.sh` 统一解析，优先级：**位置参数 > 环境变量 `VTOY_AI_BUILD_DIR` >
-机器本地 `~/.config/ventoy-ai/defaults.sh` > 内置默认 `${XDG_CACHE_HOME:-$HOME/.cache}/ventoy-ai`**。
-本机私有路径写进本机文件，不要提交：
+`pack/defaults.user.sh` > 内置默认 `${XDG_CACHE_HOME:-$HOME/.cache}/ventoy-ai`**。
+本机私有路径写在与 `defaults.sh` 同目录的 `defaults.user.sh`（已 gitignore，不进仓库）：
 
 ```sh
-# ~/.config/ventoy-ai/defaults.sh
+# pack/defaults.user.sh
 export VTOY_AI_BUILD_DIR=/path/to/ventoy-ai-build
 export VTOY_AI_BUSYBOX_SRC=/path/to/busybox-1.36.1    # 可选，不给则自动下载官方源码包
 export VTOY_AI_VENTOY_RELEASE=/path/to/ventoy-1.1.05  # 仅 make_ventoy_testdisk.sh 需要
 ```
+
+没有这个文件也能构建（走内置默认），`source` 时只打一行提示说明实际生效的构建目录。
 
 ```sh
 AI=$(pwd)                        # 仓库根；下文示例假定已在仓库根目录

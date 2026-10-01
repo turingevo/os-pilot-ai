@@ -38,8 +38,10 @@ for _c in 'abcdefghijklmnopqrstuvwxyz0123456789':
 
 
 def build_dir() -> Path:
+    # VTOY_AI_PACK_DIR：sh -c 里 $0 不带路径，defaults.sh 无法自查所在目录（用户配置在同目录）
+    env = {**os.environ, 'VTOY_AI_PACK_DIR': str(SH)}
     out = subprocess.run(['sh', '-c', f'. "{SH}/defaults.sh"; printf %s "$VTOY_AI_BUILD_DIR"'],
-                         capture_output=True, text=True, check=True).stdout.strip()
+                         capture_output=True, text=True, check=True, env=env).stdout.strip()
     if not out:
         raise SystemExit('无法解析 VTOY_AI_BUILD_DIR（检查 pack/defaults.sh）')
     return Path(out)
@@ -49,8 +51,9 @@ def qemu_args() -> list:
     """QEMU 加速与资源参数（-accel/-m/-smp），取自 defaults.sh，与 sh 脚本同源。"""
     cmd = ('. "{}/defaults.sh"; '
            'printf "%s\\n" "$VTOY_AI_QEMU_ACCEL" "$VTOY_AI_QEMU_MEM" "$VTOY_AI_QEMU_SMP"').format(SH)
+    env = {**os.environ, 'VTOY_AI_PACK_DIR': str(SH)}
     out = subprocess.run(['sh', '-c', cmd],
-                         capture_output=True, text=True, check=True).stdout.splitlines()
+                         capture_output=True, text=True, check=True, env=env).stdout.splitlines()
     if len(out) != 3:
         raise SystemExit('无法解析 QEMU 资源默认值（检查 pack/defaults.sh）')
     accel, mem, smp = out
