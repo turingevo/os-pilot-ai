@@ -123,10 +123,22 @@ else
         EXTRA=$(cat /iso/ventoy/ai/llama-server.args)
         echo "[init] 追加启动参数: $EXTRA"
     fi
+    # 上下文窗口按内存分档：本类模型是混合注意力（仅 8 层全注意力），KV 实测 32 KiB/token，
+    # 8192/16384/32768 分别占 256/512/1024 MiB；另有权重 ~2.6 GiB 与 repack/计算缓冲 ~1.4 GiB。
+    # 小内存机器不强行放大上下文，否则会因内存吃紧拖慢或加载失败。
+    # 要固定取值：/iso/ventoy/ai/llama-server.args 里写 -c <N>（追加在后面，后者生效）。
+    CTX=8192
+    MEM_MB=$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo)
+    if [ "${MEM_MB:-0}" -ge 7000 ]; then
+        CTX=32768
+    elif [ "${MEM_MB:-0}" -ge 5500 ]; then
+        CTX=16384
+    fi
+    echo "[init] 上下文窗口: $CTX tokens（本机内存 ${MEM_MB:-?} MB）"
     echo "[init] 启动本地模型: $LLAMA_BIN + $MODEL ..."
     "$LLAMA_BIN" -m "$MODEL" \
         --host 127.0.0.1 --port 8069 \
-        -c 8192 -np 1 --jinja --alias "$(basename "$MODEL" .gguf)" $EXTRA \
+        -c "$CTX" -np 1 --jinja --alias "$(basename "$MODEL" .gguf)" $EXTRA \
         >/tmp/llama-server.log 2>&1 &
     LLAMA_PID=$!
     ts0=$(date +%s)

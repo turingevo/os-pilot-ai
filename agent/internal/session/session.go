@@ -471,6 +471,8 @@ type Session struct {
 
 	cmdMode bool   // true=命令模式（输入直接执行本地命令）；false=AI 模式（输入发给模型）
 	cwd     string // 命令模式的工作目录（cd 改它；run_command 与路径补全都用它）
+
+	probeInHistory string // 已写入模型的 system_probe 原文，用于识别重复探测
 }
 
 func New(cfg *config.Config, client *llm.Client, reg *tools.Registry, script bool, noReboot bool) (*Session, error) {
@@ -620,7 +622,23 @@ func (s *Session) autoProbe() error {
 	}
 	s.Log.ToolResult("system_probe", res, "")
 	s.history = append(s.history, llm.Message{Role: "user", Content: "【系统探测结果（自动执行 system_probe）】\n" + res})
+	s.probeInHistory = res
 	return nil
+}
+
+// dedupProbe 让同一份探测结果在模型上下文里只出现一次：开场 autoProbe 已整段注入，
+// 模型随后再调 system_probe 时若环境未变（结果逐字相同），只回一句指针说明。
+// 一份探测结果实测 3k~7k token，重复一次就足以撑爆本地模型的上下文窗口。
+// 环境真的变了（挂载、分区写完之后的再探测）返回完整结果，不做任何摘要。
+func (s *Session) dedupProbe(name, result string) string {
+	if name != "system_probe" {
+		return result
+	}
+	if s.probeInHistory != "" && result == s.probeInHistory {
+		return "（与上文【系统探测结果（自动执行 system_probe）】完全相同，不再重复给出；系统已变更时重新调用会返回新结果）"
+	}
+	s.probeInHistory = result
+	return result
 }
 
 // closeScreen 恢复文本控制台。正常结束时保留最后一屏画面（随后系统关机），
@@ -798,7 +816,7 @@ func (s *Session) Turn(input string) error {
 			}
 			s.Log.ToolResult(name, result, errStr)
 			s.io.toolResult(result, errStr, dur)
-			s.history = append(s.history, llm.Message{Role: "tool", ToolCallID: tc.ID, Name: name, Content: result})
+			s.history = append(s.history, llm.Message{Role: "tool", ToolCallID: tc.ID, Name: name, Content: s.dedupProbe(name, result)})
 		}
 	}
 	return fmt.Errorf("单轮工具调用达到上限 %d 次，已停止本轮", maxToolItersPerTurn)
@@ -811,9 +829,25 @@ func (s *Session) trimHistory() {
 	for cut := 1; cut < len(s.history); cut++ {
 		if s.history[cut].Role == "user" && len(s.history)-cut <= historyKeepTail {
 			s.history = append([]llm.Message{s.history[0]}, s.history[cut:]...)
+			s.forgetProbeIfTrimmed()
 			return
 		}
 	}
+}
+
+// forgetProbeIfTrimmed 裁剪可能把探测原文整段裁掉；此时必须解除去重标记，
+// 否则后续 system_probe 只回"见上文"，而上文已无该内容，模型彻底看不到系统信息。
+// 原文有两种进历史的方式：开场 user 消息（带前缀）与 system_probe 的 tool 消息（即原文）。
+func (s *Session) forgetProbeIfTrimmed() {
+	if s.probeInHistory == "" {
+		return
+	}
+	for _, m := range s.history {
+		if strings.Contains(m.Content, s.probeInHistory) {
+			return
+		}
+	}
+	s.probeInHistory = ""
 }
 
 // runShellLine 执行用户在提示符直接用 `!` 前缀输入的命令，复用 run_command 工具的
