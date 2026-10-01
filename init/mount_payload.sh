@@ -10,17 +10,30 @@ is_payload() {
     [ -d /iso/ventoy ]
 }
 
+# 挂载选项：exfat/vfat 显式给 fmask/dmask=0022，否则文件可能没有执行位
+# （用户自带的 llama-server 放在数据分区上要能直接执行）；root 只能执行至少有一个
+# x 位的文件，所以不能依赖内核默认值。其它文件系统不认识 fmask，保持裸 rw/ro。
 try_mount() {
     dev="$1"
     for fs in exfat vfat ntfs3 ntfs ext4 xfs udf iso9660; do
-        if mount -t "$fs" -o rw "$dev" /iso 2>/dev/null; then
+        case "$fs" in
+            exfat|vfat)
+                o_rw="rw,uid=0,gid=0,fmask=0022,dmask=0022"
+                o_ro="ro,uid=0,gid=0,fmask=0022,dmask=0022"
+                ;;
+            *)
+                o_rw="rw"
+                o_ro="ro"
+                ;;
+        esac
+        if mount -t "$fs" -o "$o_rw" "$dev" /iso 2>/dev/null; then
             if is_payload; then
                 echo "[mount_payload] $dev ($fs, rw)"
                 return 0
             fi
             umount /iso 2>/dev/null
         fi
-        if mount -t "$fs" -o ro "$dev" /iso 2>/dev/null; then
+        if mount -t "$fs" -o "$o_ro" "$dev" /iso 2>/dev/null; then
             if is_payload; then
                 echo "[mount_payload] $dev ($fs, ro)"
                 return 0

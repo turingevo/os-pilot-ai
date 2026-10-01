@@ -495,14 +495,18 @@ func New(cfg *config.Config, client *llm.Client, reg *tools.Registry, script boo
 	s.Ctx = &tools.Context{PayloadDir: cfg.PayloadDir, Mode: cfg.Mode, NoReboot: noReboot, Cwd: "/", IO: cio}
 	cio.SetCwd("/")
 	s.history = []llm.Message{{Role: "system", Content: s.systemPrompt()}}
-	logger.Header(map[string]string{
+	header := map[string]string{
 		"time":        time.Now().Format("2006-01-02 15:04:05"),
 		"provider":    cfg.Provider,
 		"model":       cfg.Model,
 		"mode":        cfg.Mode,
 		"payload_dir": cfg.PayloadDir,
 		"log_dir":     cfg.LogDir,
-	})
+	}
+	if cfg.LocalInference {
+		header["local_inference"] = "true"
+	}
+	logger.Header(header)
 	return s, nil
 }
 
@@ -545,8 +549,12 @@ func (s *Session) printBanner() {
 	if len(model) > 48 {
 		model = model[:48] + "..."
 	}
+	tag := ""
+	if s.Cfg.LocalInference {
+		tag = "（本地）"
+	}
 	s.io.Printf("================ AI 装机助手 ================\n")
-	s.io.Printf("模型: %s | 模式: %s | 数据分区: %s\n", model, s.Cfg.Mode, s.Cfg.PayloadDir)
+	s.io.Printf("模型: %s%s | 模式: %s | 数据分区: %s\n", model, tag, s.Cfg.Mode, s.Cfg.PayloadDir)
 	s.io.Printf("日志: %s.md\n", s.Log.Path)
 	s.io.Printf("输入问题开始对话；Tab 切命令模式（提示符 $），/help 查看命令，输入 exit 退出\n")
 	if s.io.scr != nil && !s.io.script && screen.IMEAvailable() {

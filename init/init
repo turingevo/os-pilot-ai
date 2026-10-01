@@ -15,6 +15,10 @@ mount -t tmpfs none /tmp 2>/dev/null
 
 mdev -s 2>/dev/null
 
+# ---------- loopback（本地推理/本机 HTTP 需要 127.0.0.1）----------
+ifconfig lo 127.0.0.1 up 2>/dev/null
+echo "[init] loopback: $(ifconfig lo 2>/dev/null | grep -o 'inet addr:[0-9.]*' | head -1)"
+
 # ---------- 内核模块（发行版内核：存储/文件系统/网卡/输入/显示）----------
 # 清单来自打包时的 pack/kernel-modules.list，模块为解压态 .ko（busybox 不支持 .ko.zst）。
 # 必须在挂载数据分区与 DHCP 之前加载，否则看不到 /dev/sd*、/dev/nvme* 和网卡。
@@ -74,7 +78,83 @@ if [ -f /iso/ventoy/ai.json ]; then
     echo "[init] 使用数据分区配置 /iso/ventoy/ai.json"
 fi
 if [ ! -f /ventoy/ai.json ]; then
-    echo "[init] 未找到 ai.json，请参考 /ventoy/ai/ai.json.example 创建 /iso/ventoy/ai.json"
+    echo "[init] 未找到 /iso/ventoy/ai.json（可选）：未配置时自动使用本地模型（如可用）"
+fi
+
+# ---------- 本地大模型（可选，零配置默认路径）----------
+# 数据分区放好 llama-server 与 models/*.gguf 即可本地推理；ai.json 配了 base_url
+# 即视为用远程服务，跳过本地启动（省内存与等待）。二进制优先用数据分区上的
+# （便于升级/回滚，无需重做 ISO），其次用 initramfs 内置的。
+LLAMA_BIN=""
+for p in /iso/ventoy/ai/llama-server /ventoy/ai/llama-server; do
+    if [ -x "$p" ]; then
+        LLAMA_BIN="$p"
+        break
+    fi
+done
+
+MODEL=""
+MODEL_N=0
+for f in /iso/ventoy/ai/models/*.gguf; do
+    [ -f "$f" ] || continue
+    MODEL_N=$((MODEL_N + 1))
+    [ -z "$MODEL" ] && MODEL="$f"
+done
+
+REMOTE_URL=""
+if [ -f /ventoy/ai.json ]; then
+    REMOTE_URL=$(sed -n 's/.*"base_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /ventoy/ai.json | head -n 1)
+fi
+
+if [ -n "$REMOTE_URL" ]; then
+    echo "[init] 已配置远程服务（$REMOTE_URL），跳过本地模型"
+elif [ -z "$LLAMA_BIN" ]; then
+    echo "[init] 未找到 llama-server，跳过本地模型（工具 tools/fetch_local_llm.sh 可自动放置）"
+elif [ "$MODEL_N" = "0" ]; then
+    echo "[init] 未找到模型 /iso/ventoy/ai/models/*.gguf，跳过本地模型"
+    echo "       可运行 tools/fetch_local_llm.sh 自动下载，或手动放入 GGUF 模型文件"
+elif [ "$LLAMA_BIN" = "/ventoy/ai/llama-server" ] && ! grep -q avx2 /proc/cpuinfo; then
+    echo "[init] 本机 CPU 不支持 AVX2，内置 llama-server 无法运行；"
+    echo "       可从 GitHub Release 下载 llama-server.v2 放到 /iso/ventoy/ai/llama-server"
+else
+    [ "$MODEL_N" -gt 1 ] && echo "[init] 发现多个模型，使用 $(basename "$MODEL")（按文件名排序取首个）"
+    EXTRA=""
+    if [ -f /iso/ventoy/ai/llama-server.args ]; then
+        EXTRA=$(cat /iso/ventoy/ai/llama-server.args)
+        echo "[init] 追加启动参数: $EXTRA"
+    fi
+    echo "[init] 启动本地模型: $LLAMA_BIN + $MODEL ..."
+    "$LLAMA_BIN" -m "$MODEL" \
+        --host 127.0.0.1 --port 8069 \
+        -c 8192 -np 1 --jinja --alias "$(basename "$MODEL" .gguf)" $EXTRA \
+        >/tmp/llama-server.log 2>&1 &
+    LLAMA_PID=$!
+    ts0=$(date +%s)
+    ok=0
+    n=0
+    while [ $n -lt 240 ]; do
+        if wget -q -T 3 -O /dev/null http://127.0.0.1:8069/health 2>/dev/null; then
+            ok=1
+            break
+        fi
+        if [ ! -d /proc/$LLAMA_PID ]; then
+            echo "[init] llama-server 进程已退出，日志末尾:"
+            tail -n 15 /tmp/llama-server.log
+            break
+        fi
+        sleep 1
+        n=$((n + 1))
+    done
+    ts1=$(date +%s)
+    if [ "$ok" = "1" ]; then
+        export VTOY_AI_LOCAL_LLM=1
+        export VTOY_AI_LOCAL_LLM_URL=http://127.0.0.1:8069/v1
+        export VTOY_AI_LOCAL_LLM_MODEL="$(basename "$MODEL" .gguf)"
+        echo "[init] 本地模型就绪（$((ts1 - ts0))s，RSS $(awk '/VmRSS/{print $2" "$3}' /proc/$LLAMA_PID/status 2>/dev/null)）"
+    else
+        echo "[init] 本地模型未就绪（等待 ${n}s），将依赖远程服务"
+        echo "       若为 CPU 指令集不兼容，可换用 GitHub Release 的 llama-server.v2；日志: /tmp/llama-server.log"
+    fi
 fi
 
 # ---------- M1 自动化测试钩子 ----------

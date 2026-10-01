@@ -1,6 +1,6 @@
 #!/bin/sh
 # 组装 AI 环境 initramfs（cpio.gz）
-# 内容: init + busybox(含全部 applet 符号链接) + os-pilot-ai + 配置
+# 内容: init + busybox(含全部 applet 符号链接) + os-pilot-ai + 本地推理后端 + 配置
 # 用法: pack_env.sh [输出文件] [busybox 路径]
 # 环境变量:
 #   VTOY_AI_BUILD_DIR  构建目录（默认见 defaults.sh；initramfs 与 busybox 都从这里取）
@@ -113,6 +113,17 @@ if [ -x "$IME_DIR/pinyin-ime" ] && [ -f "$IME_DIR/dict_pinyin.dat" ]; then
     chmod 755 "$ENV_DIR/ventoy/ai/ime/pinyin-ime"
 else
     echo "[pack_env] 警告: 未找到输入法组件 $IME_DIR/{pinyin-ime,dict_pinyin.dat}，跳过（可运行 ime/build.sh 生成）" >&2
+fi
+
+# 内置本地推理后端（pack/build_llama.sh 的产物，v3/AVX2；可选但默认带上）
+# 内置版只是兜底：数据分区上的 /iso/ventoy/ai/llama-server 优先级更高（免重做 ISO 即可升级/回滚）
+LLAMA_BIN="${VTOY_AI_LLAMA_BIN:-$BUILD_DIR/llama-server.v3}"
+if [ -x "$LLAMA_BIN" ]; then
+    cp "$LLAMA_BIN" "$ENV_DIR/ventoy/ai/llama-server"
+    chmod 755 "$ENV_DIR/ventoy/ai/llama-server"
+    echo "[pack_env] 已装入本地推理后端: $LLAMA_BIN"
+else
+    echo "[pack_env] 警告: 未找到 llama-server $LLAMA_BIN，跳过（可运行 pack/build_llama.sh 生成）" >&2
 fi
 
 # 发行版内核模块（fetch_kernel.sh 的裁剪产物）

@@ -23,6 +23,9 @@ type Config struct {
 	RequestTimeout int     `json:"request_timeout"`
 	LogDir         string  `json:"log_dir"`
 	PayloadDir     string  `json:"payload_dir"`
+
+	// LocalInference 表示已探测到本地 llama-server 并接管了 base_url/model（不落配置）。
+	LocalInference bool `json:"-"`
 }
 
 func Default() *Config {
@@ -62,11 +65,11 @@ func (c *Config) Timeout() time.Duration {
 }
 
 func (c *Config) Validate() error {
-	if c.BaseURL == "" {
-		return fmt.Errorf("base_url 未配置")
+	if c.BaseURL == "" && !c.LocalInference {
+		return fmt.Errorf("base_url 未配置：请在数据分区放好本地模型（tools/fetch_local_llm.sh 可自动放置），或参考 ai.json.example 配置远程服务")
 	}
-	if c.Model == "" {
-		return fmt.Errorf("model 未配置")
+	if c.Model == "" && !c.LocalInference {
+		return fmt.Errorf("model 未配置：使用远程服务时需在 ai.json 指定模型名")
 	}
 	switch c.Mode {
 	case "readonly", "orchestrate", "direct":

@@ -4,20 +4,21 @@
 
 ![](demo.png)
 
-AI 装机的 AI 运行环境与 agent：initramfs + 静态 Go agent + 自绘本地屏 + 内置拼音输入法，打成
-普通 mini-ISO 由 Ventoy 菜单启动。
+AI 装机的 AI 运行环境与 agent：initramfs + 静态 Go agent + 内置 llama-server 本地推理后端（零配置，
+模型放数据分区即用）+ 自绘本地屏 + 内置拼音输入法，打成普通 mini-ISO 由 Ventoy 菜单启动。
 
 依赖关系：**构建期不依赖 Ventoy 源码**（只需宿主的 grub-mkstandalone/genisoimage/mtools 等工具与
 下载缓存）；**运行期依赖数据分区上的两条约定**——含 `/ventoy` 目录的数据分区（挂载到 `/iso`）和
 `ventoy.json`（`schedule_boot` 工具写它，下一轮开机的无人值守安装由 Ventoy 的 grub 插件执行）。
+`ai.json` 与本地模型都可选：配了远程端点用远程，只放模型文件则自动起本地 llama-server。
 
 ## 文档索引
 
 | 文档 | 内容 |
 |------|------|
 | [`docs/AI装机入口设计.md`](docs/AI装机入口设计.md) | 入口设计：自绘屏幕、T1 入口、输入法、里程碑与验收标准、T1 实测记录 |
-| [`docs/部署.md`](docs/部署.md) | T1 入口部署（mini-ISO 放上数据分区）与数据分区配置（`ai.json` / `ventoy.json`） |
-| [`docs/测试.md`](docs/测试.md) | 测试与验证：宿主机 mock、QEMU 端到端、Ventoy 菜单、真实 U 盘、工具链、重装闭环 |
+| [`docs/部署.md`](docs/部署.md) | T1 入口部署（mini-ISO 放上数据分区）、本地模型放置（`fetch_local_llm.sh`）与数据分区配置（`ai.json` / `ventoy.json`） |
+| [`docs/测试.md`](docs/测试.md) | 测试与验证：宿主机 mock、QEMU 端到端、Ventoy 菜单、真实 U 盘、工具链、重装闭环、本地模型零配置闭环 |
 | [`docs/本地屏.md`](docs/本地屏.md) | 本地屏交互（模式切换 / 历史 / 补全）与内置拼音输入法（按键与环境变量） |
 | [`docs/工具与安全.md`](docs/工具与安全.md) | 11 个 agent 工具、内置工具链、磁盘工具三层防护 |
 
@@ -31,10 +32,11 @@ AI 装机的 AI 运行环境与 agent：initramfs + 静态 Go agent + 自绘本�
 | `agent/internal/disk/` | 磁盘业务层（供 agent 工具与将来的 TUI/GTK/WebUI 复用）：块设备枚举、受保护设备判定、parted/mke2fs/rsync 命令拼装与参数白名单，返回结构化 JSON |
 | `agent/internal/screen/` | 用户态自绘屏幕：VTF1 点阵字体（GNU Unifont 生成）+ 网格终端仿真 + fb 画布 + raw 行编辑 + 拼音输入法客户端 |
 | `ime/` | 拼音输入法 helper：`pinyin-ime.cpp`（libgooglepinyin 静态封装）、`build.sh`、`LICENSE`（Apache-2.0） |
-| `init/` | initramfs PID 1：`init`（挂载 → 加载模块 → 挂数据分区 → DHCP → 运行 agent → 关机）、`mount_payload.sh`（挂载含 `/ventoy` 的分区到 `/iso`）、`udhcpc.script` |
-| `config/ai.json.example` | 配置示例（部署为数据分区 `/ventoy/ai.json`） |
+| `init/` | initramfs PID 1：`init`（挂载 → 加载模块 → 挂数据分区 → 本地模型（可选）→ DHCP → 运行 agent → 关机）、`mount_payload.sh`（挂载含 `/ventoy` 的分区到 `/iso`）、`udhcpc.script` |
+| `config/ai.json.example` | 配置示例（部署为数据分区 `/ventoy/ai.json`；不配则自动用本地模型） |
 | `tools/make_font.py` | unifont.hex → font.bin（VTF1：索引二分 + 32B/字形，混宽位图） |
 | `tools/mock_openai_server.py` | 离线 mock LLM（剧本化 tool_calls）；`VTOY_MOCK_LOG` 落请求体、`VTOY_MOCK_SCENARIO=disk` 磁盘剧本 |
+| `tools/fetch_local_llm.sh` | 一键把 llama-server + GGUF 模型放到 U 盘数据分区（SHA256 校验、断点续传；放好即免配置本地推理） |
 | `docs/` | 文档目录（索引见上方「文档索引」） |
 
 `pack/` 脚本（全部免 root；路径经 `defaults.sh` 解析）：
@@ -46,8 +48,9 @@ AI 装机的 AI 运行环境与 agent：initramfs + 静态 Go agent + 自绘本�
 | `fetch_kernel.sh` | 下载 Ubuntu 26.04 发行版内核（linux-image + linux-modules，SHA256 固定），按 `kernel-modules.list` 裁剪模块（`.ko.zst` → `.ko`） |
 | `kernel-modules.list` | 随 initramfs 携带的模块清单（存储/文件系统/网卡/输入/显示，依赖闭包 59 个） |
 | `build_tools.sh` | 静态编译分区/格式化/备份工具链：e2fsprogs 1.47.0 + parted 3.6 + rsync 3.2.7（源码 SHA256 固定） |
+| `build_llama.sh` | 静态编译 llama-server 本地推理后端（`v3`=x86-64-v3/AVX2 默认、`v2`=SSE4.2 老 CPU；固定 llama.cpp 提交 + 归档 SHA256 校验） |
 | `make_font.sh` | unifont.hex → `$BUILD/screen/font.bin`（随 initramfs 分发；缺字体时 pack_env.sh 自动调用） |
-| `pack_env.sh` | 打包 initramfs：init + agent + 裁剪模块树 + 点阵字体 + 输入法 + 工具链（字体缺失时自动生成；输入法/工具链缺失只警告） |
+| `pack_env.sh` | 打包 initramfs：init + agent + 裁剪模块树 + 点阵字体 + 输入法 + 工具链 + 本地推理后端（字体缺失时自动生成；其余缺失只警告） |
 | `make_test_disk.sh` | 造测试 payload 盘（ext4，含假 ISO / 应答脚本 / ai.json，`mke2fs -d` 免 root） |
 | `make_iso.sh` | 生成 AI 环境 mini-ISO（T1 入口） |
 | `get_mtools.sh` / `find_mtools.sh` | 免 root 获取 / 定位 mtools（`mcopy`/`mmd`，`make_ventoy_testdisk.sh` 需要） |
@@ -82,7 +85,7 @@ AI=$(pwd)                        # 仓库根；下文示例假定已在仓库根
 BUILD=/path/to/ventoy-ai-build   # 不给则走上面的解析顺序；下文 $BUILD 指构建目录
 
 # 1) agent（产物在仓库内 agent/os-pilot-ai，已被 .gitignore 忽略；点阵字体不在二进制内，
-#    由第 6 步 pack_env.sh 生成/打包）
+#    由第 7 步 pack_env.sh 生成/打包）
 $AI/agent/build.sh
 
 # 2) x86_64 静态 busybox（默认下载官方 busybox-1.36.1 源码包 + SHA256 校验；
@@ -101,21 +104,25 @@ sh $AI/ime/build.sh
 #    源码包下载进 $BUILD/dl/ 缓存，重跑不重复下载
 sh $AI/pack/build_tools.sh
 
-# 6) 打包 initramfs（init + agent + 裁剪模块树 + 点阵字体 + 输入法 + 工具链）
+# 6) 本地推理后端 llama-server（可选，但推荐；产物 $BUILD/llama-server.v3，约 15MB）
+#    固定 llama.cpp 提交、全静态；老 CPU（无 AVX2）用 `sh $AI/pack/build_llama.sh v2` 出 v2 变体
+sh $AI/pack/build_llama.sh
+
+# 7) 打包 initramfs（init + agent + 裁剪模块树 + 点阵字体 + 输入法 + 工具链 + 本地推理后端）
 #    点阵字体缺失时自动调 pack/make_font.sh 生成（apt 下载 GNU Unifont；
 #    离线环境先跑 VTOY_FONT_HEX=<unifont.hex> sh pack/make_font.sh）
 $AI/pack/pack_env.sh
 
-# 7) 生成测试盘（ext4 payload，含假 ISO / 应答脚本 / ventoy.json / AI 环境文件）
+# 8) 生成测试盘（ext4 payload，含假 ISO / 应答脚本 / ventoy.json / AI 环境文件）
 $AI/pack/make_test_disk.sh
 
-# 8) 生成 AI 环境 mini-ISO（T1 入口；产物 $BUILD/test/0-OS-PILOT-AI.iso，约 46MB）
+# 9) 生成 AI 环境 mini-ISO（T1 入口；产物 $BUILD/test/0-OS-PILOT-AI.iso，约 52MB）
 $AI/pack/make_iso.sh
 
-# 9) 免 root 获取 mtools（仅第 10 步需要 mcopy/mmd；宿主 PATH 里已有 mtools 则跳过）
+# 10) 免 root 获取 mtools（仅第 11 步需要 mcopy/mmd；宿主 PATH 里已有 mtools 则跳过）
 sh $AI/pack/get_mtools.sh
 
-# 10) 组装完整 Ventoy 测试盘镜像（可选；供“走真实 Ventoy 菜单”的端到端测试）
+# 11) 组装完整 Ventoy 测试盘镜像（可选；供“走真实 Ventoy 菜单”的端到端测试）
 sh $AI/pack/make_ventoy_testdisk.sh
 ```
 
@@ -126,8 +133,9 @@ sh $AI/pack/make_ventoy_testdisk.sh
 QEMU（x86_64）与真机 U 盘均已验证：启动 → 挂载数据分区 → DHCP → 多轮问答与工具调用 → 写 `ventoy.json`
 → 日志落盘 → 关机；T1 菜单闭环（零 Ventoy 代码改动）；真机 UEFI GOP 自绘屏 + 拼音中文输入；内置工具链
 与受守卫磁盘工具 guest 内实测通过；**真机重装闭环已跑通**（Ubuntu 22.04 装到 AI 建的盘，
-`verify_target_image.sh` 8/8 + `run_qemu_target.sh` 引导到 gdm3）。逐轮实测记录见
-[`docs/测试.md`](docs/测试.md)；里程碑与验收标准、T1 实测记录见
+`verify_target_image.sh` 8/8 + `run_qemu_target.sh` 引导到 gdm3）；**本地模型零配置闭环已跑通**
+（exFAT 数据分区 + 内置 llama-server + GGUF 模型 → 自动起服务、2s 就绪、agent 直连本地多轮中文对话）。
+逐轮实测记录见 [`docs/测试.md`](docs/测试.md)；里程碑与验收标准、T1 实测记录见
 [`docs/AI装机入口设计.md`](docs/AI装机入口设计.md) §13 / §4.4。
 
 已知限制：
@@ -137,6 +145,9 @@ QEMU（x86_64）与真机 U 盘均已验证：启动 → 挂载数据分区 → 
 - 尚未把 T3 菜单项接入 `INSTALL/grub/grub.cfg` 与构建流程（`INSTALL` / `GRUB2` 打包）
 - 磁盘工具目前只格式化 ext2/3/4/vfat（未内置 exFAT/NTFS 工具）；对**真实 U 盘本身**的 partition/format/backup 端到端（含拔插）未测
 - `direct` 模式（跳过确认）与密钥加密存储、`/undo` 之外的回滚策略未做端到端验证
+- 本地模型：GGUF **不入 ISO**（放数据分区 `/ventoy/ai/models/`，需 ~4.5GB 内存跑 4B-Q4 级模型）；
+  内置二进制默认 v3（AVX2），无 AVX2 的老 CPU 需换 v2 变体（随 Release 分发或自行编译）；推理速度取决于机器
+  （未做 GPU/CUDA，纯 CPU）
 
 ## 许可证
 
@@ -158,6 +169,7 @@ QEMU（x86_64）与真机 U 盘均已验证：启动 → 挂载数据分区 → 
 | e2fsprogs 1.47.0 | GPL-2.0-or-later / LGPL-2.1（libuuid） | `pack/build_tools.sh`（kernel.org 源码，SHA256 校验） |
 | GNU parted 3.6 | GPL-3.0-or-later | 同上（libuuid 取自 e2fsprogs 源树，libblkid 静态链接宿主库） |
 | rsync 3.2.7 | GPL-3.0-only | 同上（内置 popt/zlib 源码树） |
+| llama.cpp（llama-server） | MIT | `pack/build_llama.sh` 固定提交源码静态编译（v3 随 initramfs 内置，v2 供老 CPU） |
 | GRUB（standalone 引导器） | GPL-3.0-or-later | `pack/make_iso.sh` 调宿主 `grub-mkstandalone` |
 
 上述第三方组件与自研代码仅构成**聚合分发**（mere aggregation）：各自独立打包、独立加载，互不构成

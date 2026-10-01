@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -27,13 +28,18 @@ func main() {
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		if *baseURL == "" || *model == "" {
+		if errors.Is(err, os.ErrNotExist) {
+			// 无配置文件也能用：init 已尝试拉起本地模型，下面走本地探测
+			fmt.Fprintf(os.Stderr, "提示: 未找到配置文件 %s，尝试使用本地模型\n", *cfgPath)
+			cfg = config.Default()
+		} else if *baseURL != "" && *model != "" {
+			fmt.Fprintf(os.Stderr, "警告: %v（改用命令行参数）\n", err)
+			cfg = config.Default()
+		} else {
 			fmt.Fprintf(os.Stderr, "加载配置 %s 失败: %v\n", *cfgPath, err)
 			fmt.Fprintf(os.Stderr, "请准备配置文件，或用 --base-url/--model/--api-key 指定大模型。\n")
 			os.Exit(2)
 		}
-		fmt.Fprintf(os.Stderr, "警告: %v（改用命令行参数）\n", err)
-		cfg = config.Default()
 	}
 	if *baseURL != "" {
 		cfg.BaseURL = *baseURL
@@ -56,6 +62,12 @@ func main() {
 	if cfg.APIKey == "" {
 		if v := os.Getenv("VTOY_AI_API_KEY"); v != "" {
 			cfg.APIKey = v
+		}
+	}
+	// base_url 未配置即视为使用本地模型：探测 init 拉起的 llama-server（未就绪则降级报错）
+	if cfg.BaseURL == "" {
+		if cfg.UseLocalLLM() {
+			fmt.Fprintf(os.Stderr, "已接入本地模型: %s（%s）\n", cfg.Model, cfg.BaseURL)
 		}
 	}
 	if err := cfg.Validate(); err != nil {

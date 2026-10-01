@@ -7,6 +7,7 @@
 #   ${VTOY_AI_DEFAULTS_FILE:-~/.config/ventoy-ai/defaults.sh}
 #     export VTOY_AI_BUILD_DIR=/path/to/ventoy-ai-build
 #     export VTOY_AI_BUSYBOX_SRC=/path/to/busybox-1.36.1   # 不给则 build_busybox.sh 自动下载
+#     export VTOY_AI_LLAMA_SRC=/path/to/llama.cpp          # 不给则 build_llama.sh 自动下载归档
 #     export VTOY_AI_VENTOY_RELEASE=/path/to/ventoy-1.1.05 # 仅 make_ventoy_testdisk.sh 需要
 #
 # 用法: . "$(dirname "$0")/defaults.sh"   （本文件可重复 source，只有首次生效）
@@ -18,6 +19,7 @@ fi
 # 已导出的环境变量要赢过本地文件里的赋值：先暂存，source 之后还原
 ai_env_build_dir="${VTOY_AI_BUILD_DIR:-}"
 ai_env_busybox_src="${VTOY_AI_BUSYBOX_SRC:-}"
+ai_env_llama_src="${VTOY_AI_LLAMA_SRC:-}"
 ai_env_ventoy_release="${VTOY_AI_VENTOY_RELEASE:-}"
 ai_env_mtools_dir="${VTOY_AI_MTOOLS_DIR:-}"
 
@@ -28,9 +30,10 @@ fi
 
 if [ -n "$ai_env_build_dir" ]; then VTOY_AI_BUILD_DIR="$ai_env_build_dir"; fi
 if [ -n "$ai_env_busybox_src" ]; then VTOY_AI_BUSYBOX_SRC="$ai_env_busybox_src"; fi
+if [ -n "$ai_env_llama_src" ]; then VTOY_AI_LLAMA_SRC="$ai_env_llama_src"; fi
 if [ -n "$ai_env_ventoy_release" ]; then VTOY_AI_VENTOY_RELEASE="$ai_env_ventoy_release"; fi
 if [ -n "$ai_env_mtools_dir" ]; then VTOY_AI_MTOOLS_DIR="$ai_env_mtools_dir"; fi
-unset ai_env_build_dir ai_env_busybox_src ai_env_ventoy_release ai_env_mtools_dir ai_defaults_file
+unset ai_env_build_dir ai_env_busybox_src ai_env_llama_src ai_env_ventoy_release ai_env_mtools_dir ai_defaults_file
 
 # 构建目录：内核/busybox/输入法/initramfs/测试盘的全部产物都在这里
 : "${VTOY_AI_BUILD_DIR:="${XDG_CACHE_HOME:-$HOME/.cache}/ventoy-ai"}"
