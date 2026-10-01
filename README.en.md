@@ -51,7 +51,7 @@ llama-server automatically.
 
 | Script | Description |
 |--------|-------------|
-| `defaults.sh` | Fallback default layer for build paths (sourced by the other scripts): positional args > `VTOY_AI_*` env vars > built-in fallback outside the repo; it reads no user config file at all (machine-local config lives in `dev.env.sh` at the repo root); prints one hint line when `VTOY_AI_BUILD_DIR` is unset; also provides the QEMU resource defaults (KVM/memory/CPUs) |
+| `defaults.sh` | Fallback default layer for build paths (sourced by the other scripts): positional args > `VTOY_AI_*` env vars > built-in fallback outside the repo; it reads no user config file at all (machine-local config lives in `dev.env.sh` at the repo root); when `VTOY_AI_BUILD_DIR` is unset it prints a hint naming the build directory actually in effect; also provides the QEMU resource defaults (KVM/memory/CPUs) |
 | `build_busybox.sh` | Build a static x86_64 busybox (downloads the official source tarball + SHA256 verification by default) |
 | `fetch_kernel.sh` | Download the Ubuntu 26.04 distro kernel (linux-image + linux-modules, pinned SHA256) and trim modules per `kernel-modules.list` (`.ko.zst` → `.ko`) |
 | `kernel-modules.list` | Module list shipped in the initramfs (storage/filesystems/NICs/input/display; dependency closure of 63 modules) |
@@ -81,14 +81,15 @@ Variables split into three layers by **ownership**, each written in a different 
 
 | Owner | Where it lives | Typical variables |
 |-------|----------------|-------------------|
-| Developer machine config (build time, set up once) | `dev.env.sh` at the repo root (gitignored; template `dev.env.sh.example`) — `. ./dev.env.sh` in the repo root turns it into environment variables | `VTOY_AI_BUILD_DIR` `VTOY_AI_BUSYBOX_SRC` `VTOY_AI_VENTOY_RELEASE` `VTOY_AI_BUILD_JOBS` `VTOY_AI_QEMU_MEM` |
+| Developer machine config (build time, set up once) | `dev.env.sh` at the repo root (gitignored; template `dev.env.sh.example`) — `. ./dev.env.sh` turns it into environment variables | `VTOY_AI_BUILD_DIR` `VTOY_AI_BUSYBOX_SRC` `VTOY_AI_VENTOY_RELEASE` `VTOY_AI_BUILD_JOBS` `VTOY_AI_QEMU_MEM` |
 | Single-run knobs (this invocation only) | Command-line prefix — **never written into a file** | `VTOY_AI_INTERACTIVE=1` `VTOY_AI_TOOLS_FORCE=1` `VTOY_AI_DISK=/dev/sdb` |
 | Product runtime config (inside the guest) | `ai.json` / `ventoy.json` on the USB data partition | `api_key` `base_url` `screen` `local_llm` |
 
 Resolution therefore has just two sources: **positional args > environment variables > the built-in
 fallback in `pack/defaults.sh` (`${XDG_CACHE_HOME:-$HOME/.cache}/ventoy-ai`)**. `defaults.sh` is a
 pure fallback layer (every other script sources it) and reads no user config file; when
-`VTOY_AI_BUILD_DIR` is unset, sourcing it prints one hint line pointing at `dev.env.sh`.
+`VTOY_AI_BUILD_DIR` is unset, sourcing it prints a hint naming the build directory actually in
+effect and pointing at `dev.env.sh`.
 
 ```sh
 # Configure the dev machine once; afterwards every pack/ ime/ tools/ script runs as-is

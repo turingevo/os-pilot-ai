@@ -44,7 +44,7 @@ AI 装机的 AI 运行环境与 agent：initramfs + 静态 Go agent + 内置 lla
 
 | 脚本 | 说明 |
 |------|------|
-| `defaults.sh` | 构建路径的兜底默认层（其余脚本 source）：位置参数 > `VTOY_AI_*` 环境变量 > 仓库外内置默认，本文件不读任何用户配置（本机配置在仓库根 `dev.env.sh`）；未设置 `VTOY_AI_BUILD_DIR` 时打一行提示；并给出 QEMU 资源默认值（KVM/内存/CPU） |
+| `defaults.sh` | 构建路径的兜底默认层（其余脚本 source）：位置参数 > `VTOY_AI_*` 环境变量 > 仓库外内置默认，本文件不读任何用户配置（本机配置在仓库根 `dev.env.sh`）；未设置 `VTOY_AI_BUILD_DIR` 时打提示说明本次实际生效的构建目录；并给出 QEMU 资源默认值（KVM/内存/CPU） |
 | `build_busybox.sh` | 编译 x86_64 静态 busybox（默认下载官方源码包 + SHA256 校验） |
 | `fetch_kernel.sh` | 下载 Ubuntu 26.04 发行版内核（linux-image + linux-modules，SHA256 固定），按 `kernel-modules.list` 裁剪模块（`.ko.zst` → `.ko`） |
 | `kernel-modules.list` | 随 initramfs 携带的模块清单（存储/文件系统/网卡/输入/显示，依赖闭包 63 个） |
@@ -74,13 +74,14 @@ AI 装机的 AI 运行环境与 agent：initramfs + 静态 Go agent + 内置 lla
 
 | 归属 | 写在哪里 | 典型变量 |
 |------|----------|----------|
-| 开发者本机配置（构建期，一次性） | 仓库根 `dev.env.sh`（已 gitignore，模板 `dev.env.sh.example`）；在仓库根 `. ./dev.env.sh` 之后就变成环境变量 | `VTOY_AI_BUILD_DIR` `VTOY_AI_BUSYBOX_SRC` `VTOY_AI_VENTOY_RELEASE` `VTOY_AI_BUILD_JOBS` `VTOY_AI_QEMU_MEM` |
+| 开发者本机配置（构建期，一次性） | 仓库根 `dev.env.sh`（已 gitignore，模板 `dev.env.sh.example`）；`. ./dev.env.sh` 之后即导出为环境变量 | `VTOY_AI_BUILD_DIR` `VTOY_AI_BUSYBOX_SRC` `VTOY_AI_VENTOY_RELEASE` `VTOY_AI_BUILD_JOBS` `VTOY_AI_QEMU_MEM` |
 | 单次运行开关（只对本次有效） | 命令行前缀，**不写进任何文件** | `VTOY_AI_INTERACTIVE=1` `VTOY_AI_TOOLS_FORCE=1` `VTOY_AI_DISK=/dev/sdb` |
 | 产品运行时配置（guest 内） | U 盘上的 `ai.json` / `ventoy.json` | `api_key` `base_url` `screen` `local_llm` |
 
 解析优先级因此只有两条来源：**位置参数 > 环境变量 > `pack/defaults.sh` 内置默认
 `${XDG_CACHE_HOME:-$HOME/.cache}/ventoy-ai`**。`defaults.sh` 是纯兜底层（其余脚本都 source 它），
-不再读任何用户配置文件；未设置 `VTOY_AI_BUILD_DIR` 时 `source` 它只打一行提示，指向 `dev.env.sh`。
+不再读任何用户配置文件；未设置 `VTOY_AI_BUILD_DIR` 时 `source` 它会打提示（说明本次实际生效的
+构建目录并指向 `dev.env.sh`）。
 
 ```sh
 # 开发机配置一次即可；之后 pack/ ime/ tools/ 下的脚本直接运行，不用逐条加前缀
