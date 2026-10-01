@@ -37,13 +37,14 @@ AI 装机的 AI 运行环境与 agent：initramfs + 静态 Go agent + 内置 lla
 | `tools/make_font.py` | unifont.hex → font.bin（VTF1：索引二分 + 32B/字形，混宽位图） |
 | `tools/mock_openai_server.py` | 离线 mock LLM（剧本化 tool_calls）；`VTOY_MOCK_LOG` 落请求体、`VTOY_MOCK_SCENARIO=disk` 磁盘剧本 |
 | `tools/fetch_local_llm.sh` | 一键把 llama-server + GGUF 模型放到 U 盘数据分区（SHA256 校验、断点续传；放好即免配置本地推理） |
+| `dev.env.sh.example` | 开发机本机配置模板（构建期路径与本机实测值；复制成 `dev.env.sh` 后 source，本机那份已 gitignore） |
 | `docs/` | 文档目录（索引见上方「文档索引」） |
 
-`pack/` 脚本（全部免 root；路径经 `defaults.sh` 解析）：
+`pack/` 脚本（全部免 root；路径经 `dev.env.sh` + `defaults.sh` 解析）：
 
 | 脚本 | 说明 |
 |------|------|
-| `defaults.sh` | 构建路径解析层（其余脚本 source）：位置参数 > `VTOY_AI_*` 环境变量 > `pack/defaults.user.sh`（本机私有，gitignore）> 仓库外内置默认；缺该文件时 source 打一行提示；并给出 QEMU 资源默认值（KVM/内存/CPU） |
+| `defaults.sh` | 构建路径的兜底默认层（其余脚本 source）：位置参数 > `VTOY_AI_*` 环境变量 > 仓库外内置默认，本文件不读任何用户配置（本机配置在仓库根 `dev.env.sh`）；未设置 `VTOY_AI_BUILD_DIR` 时打一行提示；并给出 QEMU 资源默认值（KVM/内存/CPU） |
 | `build_busybox.sh` | 编译 x86_64 静态 busybox（默认下载官方源码包 + SHA256 校验） |
 | `fetch_kernel.sh` | 下载 Ubuntu 26.04 发行版内核（linux-image + linux-modules，SHA256 固定），按 `kernel-modules.list` 裁剪模块（`.ko.zst` → `.ko`） |
 | `kernel-modules.list` | 随 initramfs 携带的模块清单（存储/文件系统/网卡/输入/显示，依赖闭包 63 个） |
@@ -69,22 +70,30 @@ AI 装机的 AI 运行环境与 agent：initramfs + 静态 Go agent + 内置 lla
 
 ## 构建（rootless，全部在仓库外构建）
 
-构建目录由 `pack/defaults.sh` 统一解析，优先级：**位置参数 > 环境变量 `VTOY_AI_BUILD_DIR` >
-`pack/defaults.user.sh` > 内置默认 `${XDG_CACHE_HOME:-$HOME/.cache}/ventoy-ai`**。
-本机私有路径写在与 `defaults.sh` 同目录的 `defaults.user.sh`（已 gitignore，不进仓库）：
+变量按**归属**分三层，写的位置各不相同：
+
+| 归属 | 写在哪里 | 典型变量 |
+|------|----------|----------|
+| 开发者本机配置（构建期，一次性） | 仓库根 `dev.env.sh`（已 gitignore，模板 `dev.env.sh.example`）；在仓库根 `. ./dev.env.sh` 之后就变成环境变量 | `VTOY_AI_BUILD_DIR` `VTOY_AI_BUSYBOX_SRC` `VTOY_AI_VENTOY_RELEASE` `VTOY_AI_BUILD_JOBS` `VTOY_AI_QEMU_MEM` |
+| 单次运行开关（只对本次有效） | 命令行前缀，**不写进任何文件** | `VTOY_AI_INTERACTIVE=1` `VTOY_AI_TOOLS_FORCE=1` `VTOY_AI_DISK=/dev/sdb` |
+| 产品运行时配置（guest 内） | U 盘上的 `ai.json` / `ventoy.json` | `api_key` `base_url` `screen` `local_llm` |
+
+解析优先级因此只有两条来源：**位置参数 > 环境变量 > `pack/defaults.sh` 内置默认
+`${XDG_CACHE_HOME:-$HOME/.cache}/ventoy-ai`**。`defaults.sh` 是纯兜底层（其余脚本都 source 它），
+不再读任何用户配置文件；未设置 `VTOY_AI_BUILD_DIR` 时 `source` 它只打一行提示，指向 `dev.env.sh`。
 
 ```sh
-# pack/defaults.user.sh
-export VTOY_AI_BUILD_DIR=/path/to/ventoy-ai-build
-export VTOY_AI_BUSYBOX_SRC=/path/to/busybox-1.36.1    # 可选，不给则自动下载官方源码包
-export VTOY_AI_VENTOY_RELEASE=/path/to/ventoy-1.1.05  # 仅 make_ventoy_testdisk.sh 需要
+# 开发机配置一次即可；之后 pack/ ime/ tools/ 下的脚本直接运行，不用逐条加前缀
+cp dev.env.sh.example dev.env.sh    # 然后把里面的路径改成本机的
+. ./dev.env.sh                      # 只有 export，不含路径自查，从别的目录用绝对路径 source 也一样
+
+# 不建 dev.env.sh 也能构建：单次前缀给值，或干脆走内置默认（会打提示）
+VTOY_AI_BUILD_DIR=/path/to/ventoy-ai-build sh pack/pack_env.sh
 ```
 
-没有这个文件也能构建（走内置默认），`source` 时只打一行提示说明实际生效的构建目录。
-
 ```sh
-AI=$(pwd)                        # 仓库根；下文示例假定已在仓库根目录
-BUILD=/path/to/ventoy-ai-build   # 不给则走上面的解析顺序；下文 $BUILD 指构建目录
+AI=$(pwd)                        # 仓库根；下文示例假定已在仓库根目录，且已 `. ./dev.env.sh`
+BUILD=$VTOY_AI_BUILD_DIR         # 下文 $BUILD 指构建目录（未 source 时走内置默认）
 
 # 1) agent（产物在仓库内 agent/os-pilot-ai，已被 .gitignore 忽略；点阵字体不在二进制内，
 #    由第 7 步 pack_env.sh 生成/打包）

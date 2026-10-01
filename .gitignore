@@ -1,5 +1,5 @@
-# 构建产物（构建源在仓库外的构建目录，路径解析见 pack/defaults.sh）
+# 构建产物（构建源在仓库外的构建目录，路径解析见 pack/defaults.sh 与仓库根的 dev.env.sh）
 agent/os-pilot-ai
 __pycache__/
-# 本机私有构建路径（该文件缺失时 pack/defaults.sh 会提示；示例见其顶部注释）
-pack/defaults.user.sh
+# 本机开发配置（构建期环境变量；模板 dev.env.sh.example，这份本机值不提交）
+dev.env.sh

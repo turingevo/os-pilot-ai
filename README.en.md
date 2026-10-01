@@ -44,13 +44,14 @@ llama-server automatically.
 | `tools/make_font.py` | unifont.hex → font.bin (VTF1: binary-search index + 32 B/glyph, mixed-width bitmaps) |
 | `tools/mock_openai_server.py` | Offline mock LLM (scripted tool_calls); `VTOY_MOCK_LOG` dumps request bodies, `VTOY_MOCK_SCENARIO=disk` for the disk scenario |
 | `tools/fetch_local_llm.sh` | One-shot placement of llama-server + a GGUF model onto the USB data partition (SHA256 checks, resume support; zero-config local inference once done) |
+| `dev.env.sh.example` | Template for the developer's machine-local config (build-time paths and machine-specific values; copy to `dev.env.sh` and source it — the local file is gitignored) |
 | `docs/` | Documentation (see the index above) |
 
-`pack/` scripts (all rootless; paths resolved via `defaults.sh`):
+`pack/` scripts (all rootless; paths resolved via `dev.env.sh` + `defaults.sh`):
 
 | Script | Description |
 |--------|-------------|
-| `defaults.sh` | Build-path resolution layer (sourced by the other scripts): positional args > `VTOY_AI_*` env vars > `pack/defaults.user.sh` (machine-private, gitignored) > built-in fallback outside the repo; sourcing prints a hint when that file is missing; also provides the QEMU resource defaults (KVM/memory/CPUs) |
+| `defaults.sh` | Fallback default layer for build paths (sourced by the other scripts): positional args > `VTOY_AI_*` env vars > built-in fallback outside the repo; it reads no user config file at all (machine-local config lives in `dev.env.sh` at the repo root); prints one hint line when `VTOY_AI_BUILD_DIR` is unset; also provides the QEMU resource defaults (KVM/memory/CPUs) |
 | `build_busybox.sh` | Build a static x86_64 busybox (downloads the official source tarball + SHA256 verification by default) |
 | `fetch_kernel.sh` | Download the Ubuntu 26.04 distro kernel (linux-image + linux-modules, pinned SHA256) and trim modules per `kernel-modules.list` (`.ko.zst` → `.ko`) |
 | `kernel-modules.list` | Module list shipped in the initramfs (storage/filesystems/NICs/input/display; dependency closure of 63 modules) |
@@ -76,24 +77,32 @@ llama-server automatically.
 
 ## Building (rootless, entirely outside the repo)
 
-The build directory is resolved by `pack/defaults.sh` with this precedence: **positional args >
-`VTOY_AI_BUILD_DIR` env var > `pack/defaults.user.sh` > built-in fallback
-`${XDG_CACHE_HOME:-$HOME/.cache}/ventoy-ai`**. Machine-private paths go in `defaults.user.sh`,
-a gitignored sibling of `defaults.sh` — never commit it:
+Variables split into three layers by **ownership**, each written in a different place:
+
+| Owner | Where it lives | Typical variables |
+|-------|----------------|-------------------|
+| Developer machine config (build time, set up once) | `dev.env.sh` at the repo root (gitignored; template `dev.env.sh.example`) — `. ./dev.env.sh` in the repo root turns it into environment variables | `VTOY_AI_BUILD_DIR` `VTOY_AI_BUSYBOX_SRC` `VTOY_AI_VENTOY_RELEASE` `VTOY_AI_BUILD_JOBS` `VTOY_AI_QEMU_MEM` |
+| Single-run knobs (this invocation only) | Command-line prefix — **never written into a file** | `VTOY_AI_INTERACTIVE=1` `VTOY_AI_TOOLS_FORCE=1` `VTOY_AI_DISK=/dev/sdb` |
+| Product runtime config (inside the guest) | `ai.json` / `ventoy.json` on the USB data partition | `api_key` `base_url` `screen` `local_llm` |
+
+Resolution therefore has just two sources: **positional args > environment variables > the built-in
+fallback in `pack/defaults.sh` (`${XDG_CACHE_HOME:-$HOME/.cache}/ventoy-ai`)**. `defaults.sh` is a
+pure fallback layer (every other script sources it) and reads no user config file; when
+`VTOY_AI_BUILD_DIR` is unset, sourcing it prints one hint line pointing at `dev.env.sh`.
 
 ```sh
-# pack/defaults.user.sh
-export VTOY_AI_BUILD_DIR=/path/to/ventoy-ai-build
-export VTOY_AI_BUSYBOX_SRC=/path/to/busybox-1.36.1    # optional; downloads the official tarball if unset
-export VTOY_AI_VENTOY_RELEASE=/path/to/ventoy-1.1.05  # only needed by make_ventoy_testdisk.sh
+# Configure the dev machine once; afterwards every pack/ ime/ tools/ script runs as-is
+cp dev.env.sh.example dev.env.sh    # then edit the paths for your machine
+. ./dev.env.sh                      # bare exports only, no path self-discovery — sourcing it by absolute path from anywhere works too
+
+# Building without dev.env.sh also works: pass values per invocation, or take the built-in
+# fallback (which prints the hint)
+VTOY_AI_BUILD_DIR=/path/to/ventoy-ai-build sh pack/pack_env.sh
 ```
 
-Without that file the build still works (built-in fallback); `source` just prints one hint line
-naming the build directory actually in effect.
-
 ```sh
-AI=$(pwd)                        # repo root; examples assume you are in the repo root
-BUILD=/path/to/ventoy-ai-build   # resolved as above when unset; $BUILD below is the build directory
+AI=$(pwd)                        # repo root; examples assume you are in the repo root and have run `. ./dev.env.sh`
+BUILD=$VTOY_AI_BUILD_DIR         # $BUILD below is the build directory (built-in fallback when not sourced)
 
 # 1) agent (output: agent/os-pilot-ai inside the repo, gitignored; the bitmap font is NOT embedded
 #    in the binary — it is generated/packed by pack_env.sh in step 7)
